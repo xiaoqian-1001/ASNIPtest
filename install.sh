@@ -2,8 +2,11 @@
 set -euo pipefail
 
 # ──────────────────────────────────────────────
-# cf-ip-scanner 一键安装脚本
-# 用法: curl -fsSL <raw_url> | bash
+# ASNIPtest 一键安装 / 更新 / 卸载
+# 用法:
+#   curl -fsSL <raw_url> | bash                  # 安装
+#   curl -fsSL <raw_url> | bash -s -- update     # 更新
+#   curl -fsSL <raw_url> | bash -s -- uninstall  # 卸载
 # ──────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -12,8 +15,8 @@ BOLD='\033[1m'
 logo() {
     echo -e "${CYAN}${BOLD}"
     echo "   ╔══════════════════════════════╗"
-    echo "   ║     cf-ip-scanner           ║"
-    echo "   ║  ASN → masscan → CF 反代    ║"
+    echo "   ║       ASNIPtest              ║"
+    echo "   ║  ASN → masscan → CF 节点    ║"
     echo "   ╚══════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -21,22 +24,60 @@ logo() {
 info()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${RED}[!]${NC} $*"; }
 
+ACTION="${1:-install}"
+
+# ── 卸载 ──
+if [ "$ACTION" = "uninstall" ]; then
+    echo ""
+    for d in "$HOME/ASNIPtest" "$HOME/cf-ip-scanner" "$HOME/cf-ip-scanner.tmp"; do
+        if [ -d "$d" ]; then
+            rm -rf "$d"
+            info "已删除 $d"
+        fi
+    done
+    echo ""
+    echo -e "${GREEN}✅ 卸载完成${NC}"
+    exit 0
+fi
+
+# ── 更新 ──
+if [ "$ACTION" = "update" ]; then
+    PROJECT_DIR="$HOME/ASNIPtest"
+    if [ ! -d "$PROJECT_DIR/.git" ]; then
+        warn "项目未安装，请先运行: bash install.sh"
+        exit 1
+    fi
+    info "更新项目..."
+    cd "$PROJECT_DIR"
+    git pull origin main --ff-only
+    info "重新编译 cf-scanner..."
+    cd "$PROJECT_DIR/cf-scanner"
+    if grep -q avx2 /proc/cpuinfo 2>/dev/null; then GOAMD=""; else GOAMD="GOAMD64=v2"; fi
+    env $GOAMD go build -o "$PROJECT_DIR/cf-scanner" main.go
+    echo ""
+    echo -e "${GREEN}✅ 更新完成${NC} → $PROJECT_DIR"
+    exit 0
+fi
+
+# ── 以下为安装流程 ──
 logo
 
 # ── 0. 检查系统 ──
-OS="$(uname -s)"
-if [ "$OS" != "Linux" ]; then
-    warn "当前仅支持 Linux (masscan 依赖)"
+if [ "$(uname -s)" != "Linux" ]; then
+    warn "当前仅支持 Linux"
     exit 1
 fi
+[ "$(id -u)" = "0" ] && SUDO="" || SUDO="sudo"
 
-if [ "$(id -u)" = "0" ]; then
-    SUDO=""
-else
-    SUDO="sudo"
-fi
+# ── 清理旧版本 ──
+for d in "$HOME/cf-ip-scanner" "$HOME/cf-ip-scanner.tmp"; do
+    if [ -d "$d" ]; then
+        warn "清理旧版本: $d"
+        rm -rf "$d"
+    fi
+done
 
-# ── 1. 安装系统依赖 ──
+# ── 1. 系统依赖 ──
 info "检查系统依赖..."
 
 install_pkg() {
@@ -61,7 +102,7 @@ install_pkg prips
 install_pkg python3
 install_pkg git
 
-# ── 2. 检查/安装 Go ──
+# ── 2. Go ──
 info "检查 Go..."
 if command -v go &>/dev/null; then
     GO_VERSION=$(go version | grep -oP 'go\K[0-9.]+')
@@ -80,28 +121,20 @@ fi
 # ── 3. 克隆项目 ──
 PROJECT_DIR="$HOME/ASNIPtest"
 REPO_URL="https://github.com/e13815332/ASNIPtest.git"
-BRANCH="main"
 
 if [ -d "$PROJECT_DIR/.git" ]; then
     info "项目已存在，更新中..."
     cd "$PROJECT_DIR"
-    git pull origin "$BRANCH" --ff-only
+    git pull origin main --ff-only
 else
     info "克隆项目..."
-    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$PROJECT_DIR"
+    git clone --depth 1 --branch main "$REPO_URL" "$PROJECT_DIR"
 fi
 
 # ── 4. 编译 cf-scanner ──
 info "编译 cf-scanner..."
 cd "$PROJECT_DIR/cf-scanner"
-
-# AVX2 检测：不支持则用 v2
-if grep -q avx2 /proc/cpuinfo 2>/dev/null; then
-    GOAMD=""
-else
-    GOAMD="GOAMD64=v2"
-fi
-
+if grep -q avx2 /proc/cpuinfo 2>/dev/null; then GOAMD=""; else GOAMD="GOAMD64=v2"; fi
 env $GOAMD go build -o "$PROJECT_DIR/cf-scanner" main.go
 info "cf-scanner 编译完成 → $PROJECT_DIR/cf-scanner"
 
@@ -112,4 +145,7 @@ echo ""
 echo -e "  ${CYAN}项目目录:${NC} $PROJECT_DIR"
 echo -e "  ${CYAN}编辑端口:${NC} vim $PROJECT_DIR/ports.txt"
 echo -e "  ${CYAN}运行扫描:${NC}  cd $PROJECT_DIR && python3 run.py AS209242"
+echo ""
+echo -e "  ${CYAN}更新:${NC} bash $PROJECT_DIR/install.sh update"
+echo -e "  ${CYAN}卸载:${NC} bash $PROJECT_DIR/install.sh uninstall"
 echo ""
