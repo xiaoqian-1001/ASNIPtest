@@ -140,9 +140,15 @@ do_install() {
     info "cf-scanner 编译完成"
 
     echo ""
-    echo -e "${GREEN}${BOLD}✅ 安装完成，开始运行${NC}"
-    echo ""
-    exec python3 "$PROJECT_DIR/run.py" < /dev/tty
+    if [ -t 0 ]; then
+        echo -e "${GREEN}${BOLD}✅ 安装完成，开始运行${NC}"
+        echo ""
+        exec python3 "$PROJECT_DIR/run.py"
+    else
+        echo -e "${GREEN}${BOLD}✅ 安装完成${NC}"
+        echo ""
+        echo -e "  ${CYAN}运行:${NC} cd $PROJECT_DIR && python3 run.py"
+    fi
 }
 
 # ── 菜单 (交互终端时) ──
