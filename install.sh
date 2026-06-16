@@ -11,7 +11,7 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC='\033[0m'
 BOLD='\033[1m'
 
-VERSION="v1.0.0"
+VERSION="v1.0.1"
 
 logo() {
     echo -e "${CYAN}${BOLD}"
@@ -152,15 +152,9 @@ do_install() {
     info "cf-scanner 编译完成"
 
     echo ""
-    if [ -t 0 ]; then
-        echo -e "${GREEN}${BOLD}✅ 安装完成，开始运行${NC}"
-        echo ""
-        exec python3 "$PROJECT_DIR/run.py"
-    else
-        echo -e "${GREEN}${BOLD}✅ 安装完成${NC}"
-        echo ""
-        echo -e "  ${CYAN}运行:${NC} cd $PROJECT_DIR && python3 run.py"
-    fi
+    echo -e "${GREEN}${BOLD}✅ 安装完成，开始运行${NC}"
+    echo ""
+    exec python3 "$PROJECT_DIR/run.py"
 }
 
 # ── 菜单 (交互终端时) ──
