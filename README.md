@@ -75,7 +75,6 @@ wsl --install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/e13815332/ASNIPtest/main/install.sh | bash
-cmtjd
 ```
 
 > WSL2 和真实 Linux 体验完全一致，masscan 原生运行无任何限制。
