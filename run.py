@@ -289,8 +289,8 @@ def speed_test():
             except:
                 pass
 
-            # 下载速度 (通过 CF 节点下载 speed.cloudflare.com)
-            speed_kbps = 0
+            # 下载速度 (通过 CF 节点下载 speed.cloudflare.com)，Mbps
+            speed_mbps = 0
             if latency > 0:
                 try:
                     r = subprocess.run([
@@ -300,17 +300,17 @@ def speed_test():
                         "https://speed.cloudflare.com/__down?bytes=524288"
                     ], capture_output=True, text=True, timeout=15)
                     speed_bps = float(r.stdout.strip() or 0)
-                    speed_kbps = round(speed_bps / 1024)
+                    speed_mbps = round(speed_bps * 8 / 1000000, 2)
                 except:
                     pass
 
             parts[6] = str(latency)
-            parts[7] = str(speed_kbps)
+            parts[7] = str(speed_mbps)
             f.write(",".join(parts) + "\n")
 
             tested += 1
             if tested % 10 == 0 or tested == total:
-                sys.stderr.write(f"\r  {tested}/{total} | 延迟 {latency}ms  速度 {speed_kbps}KB/s  {'':20}")
+                sys.stderr.write(f"\r  {tested}/{total} | 延迟 {latency}ms  速度 {speed_mbps}Mbps  {'':20}")
                 sys.stderr.flush()
 
     sys.stderr.write(f"\r  测速完成: {total} 个节点{'':40}\n")
