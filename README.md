@@ -196,6 +196,16 @@ http://1.2.3.4:8899/output_AS209242_20260617_120000.csv
 
 > `install.sh` 自动处理所有依赖。
 
+### 不支持的环境
+
+masscan 依赖 **raw socket**（CAP_NET_RAW），以下环境无法运行：
+
+- ❌ NAT 容器（独角鲸/小鲸等，缺少 CAP_NET_RAW）
+- ❌ OpenVZ / LXC 未开启特权模式
+- ⚠️ WSL2（内核限制）
+
+> 换到 KVM VPS 或物理机即可正常使用。
+
 ---
 
 ## 卸载
