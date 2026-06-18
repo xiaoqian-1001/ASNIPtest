@@ -64,6 +64,20 @@ def get_public_ip():
 
     return "127.0.0.1"
 
+# ── 获取局域网 IP（下载链接用，不走出口 IP） ──
+def get_lan_ip():
+    """获取本机局域网 IP，用于下载链接；家用宽带出口 IP 无法直连"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
 # ── 公网 IP + 运营商检测 ──
 def detect_isp():
     """检测本机公网 IP 及运营商，返回 (ip, country, isp_name)"""
@@ -328,9 +342,9 @@ def output_csv(asns):
 
     print(f"\n  结果: {len(lines)} 条 → {output.name}")
 
-    # ── 提供下载链接 (支持 NAT/Docker 环境) ──
+    # ── 提供下载链接（局域网 IP，不用出口 IP） ──
     try:
-        ip = get_public_ip()
+        ip = get_lan_ip()
         port = 8899
         print(f"\n  📥 下载链接 (临时, 按回车关闭):")
         print(f"  http://{ip}:{port}/{output.name}")
@@ -377,10 +391,16 @@ if __name__ == "__main__":
         ("5/6 API精筛",   api_verify),
     ]
 
-    if GLOBAL_COUNTRY == "CN":
+    # 测速：让用户选择
+    choice = ""
+    try:
+        choice = input("\n  是否测速？(y/n，默认跳过): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    if choice == "y":
         steps.append(("6/6 测速", speed_test))
     else:
-        print(f"\n  非中国 IP，跳过测速\n")
+        print("  跳过测速\n")
 
     for label, fn in steps:
         print(f"\n  [{label}]")
