@@ -13,5 +13,11 @@ for d in "$HOME/ASNIPtest" "$HOME/cf-ip-scanner.tmp"; do
     fi
 done
 
+WRAPPER="/usr/local/bin/asniptest"
+if [ -f "$WRAPPER" ]; then
+    sudo rm -f "$WRAPPER"
+    info "已删除快捷命令 $WRAPPER"
+fi
+
 echo ""
 echo -e "${GREEN}✅ 卸载完成${NC}"

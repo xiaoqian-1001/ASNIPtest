@@ -4,7 +4,7 @@
 cf-ip-scanner — 从 ASN 拉取 IP，masscan 扫描，检测 Cloudflare 反代节点
 用法: python3 run.py AS209242 [AS3214 ...]
 """
-import sys, os, subprocess, json, urllib.request, multiprocessing, socket
+import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time
 from pathlib import Path
 from datetime import datetime
 
@@ -28,6 +28,37 @@ API_CONCURRENT  = min(CPU_CORES * 16, 32)
 API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
 
 print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
+
+# ── 公网 IP + 运营商检测 ──
+def detect_isp():
+    """检测本机公网 IP 及运营商，返回 (ip, country, isp_name)"""
+    ip = get_public_ip()
+    print(f"\n  本机公网 IP: {ip}")
+    try:
+        token = None
+        token_file = Path("/root/.ipinfo_token")
+        if token_file.is_file():
+            token = token_file.read_text().strip()
+        url = f"https://ipinfo.io/{ip}/json"
+        if token:
+            url += f"?token={token}"
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+            country = data.get("country", "")
+            org = data.get("org", "")
+            city = data.get("city", "")
+            if country == "CN":
+                isp = org.split(" ", 1)[-1] if org else "未知"
+                print(f"  地区: {city}, {country}  🇨🇳  运营商: {isp}")
+            else:
+                isp = org
+                print(f"  地区: {city}, {country}  机构: {org}")
+            return ip, country, isp
+    except Exception as e:
+        print(f"  (无法获取详情: {e})")
+    return ip, "", ""
+
+GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
 
 # ── 获取公网 IP (NAT/Docker 环境兼容) ──
 def get_public_ip():
@@ -158,7 +189,82 @@ def api_verify():
     print(f"  精筛通过: {passed}")
     return passed
 
-# ── Step 6: 输出 + 下载链接 ──
+# ── Step 6: 测速 ──
+def speed_test():
+    verified_file = BASE / "verified.txt"
+    if not verified_file.exists() or verified_file.stat().st_size == 0:
+        print("  无节点，跳过")
+        return
+
+    lines = []
+    with open(verified_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("IP地址"):
+                lines.append(line)
+                continue
+            lines.append(line)
+
+    if len(lines) <= 1:
+        print("  无节点，跳过")
+        return
+
+    header = lines[0]
+    entries = lines[1:]
+    total = len(entries)
+    tested = 0
+
+    print(f"  节点数: {total}")
+
+    with open(verified_file, "w") as f:
+        f.write(header + "\n")
+        for entry in entries:
+            parts = entry.split(",")
+            if len(parts) < 9:
+                continue
+            ip, port = parts[0], parts[1]
+
+            # TCP 延迟
+            latency = 0
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5)
+                t0 = time.time()
+                s.connect((ip, int(port)))
+                latency = round((time.time() - t0) * 1000)
+                s.close()
+            except:
+                pass
+
+            # 下载速度 (通过 CF 节点下载 speed.cloudflare.com)
+            speed_kbps = 0
+            if latency > 0:
+                try:
+                    r = subprocess.run([
+                        "curl", "--connect-to", f"speed.cloudflare.com:443:{ip}:{port}",
+                        "-o", "/dev/null", "-s", "-w", "%{speed_download}",
+                        "--connect-timeout", "5", "--max-time", "10",
+                        "https://speed.cloudflare.com/__down?bytes=524288"
+                    ], capture_output=True, text=True, timeout=15)
+                    speed_bps = float(r.stdout.strip() or 0)
+                    speed_kbps = round(speed_bps / 1024)
+                except:
+                    pass
+
+            parts[6] = str(latency)
+            parts[7] = str(speed_kbps)
+            f.write(",".join(parts) + "\n")
+
+            tested += 1
+            if tested % 10 == 0 or tested == total:
+                sys.stderr.write(f"\r  {tested}/{total} | 延迟 {latency}ms  速度 {speed_kbps}KB/s  {'':20}")
+                sys.stderr.flush()
+
+    sys.stderr.write(f"\r  测速完成: {total} 个节点{'':40}\n")
+
+# ── 输出 + 下载链接 ──
 def output_csv(asns):
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -227,12 +333,17 @@ if __name__ == "__main__":
     print(f"\n  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
 
     steps = [
-        ("1/5 ASN→CIDR", lambda: fetch_prefixes(asns)),
-        ("2/5 CIDR→IP",  expand_ips),
-        ("3/5 masscan",   run_masscan),
-        ("4/5 cf-scanner", cf_scan),
-        ("5/5 API精筛",   api_verify),
+        ("1/6 ASN→CIDR", lambda: fetch_prefixes(asns)),
+        ("2/6 CIDR→IP",  expand_ips),
+        ("3/6 masscan",   run_masscan),
+        ("4/6 cf-scanner", cf_scan),
+        ("5/6 API精筛",   api_verify),
     ]
+
+    if GLOBAL_COUNTRY == "CN":
+        steps.append(("6/6 测速", speed_test))
+    else:
+        print(f"\n  非中国 IP，跳过测速\n")
 
     for label, fn in steps:
         print(f"\n  [{label}]")
