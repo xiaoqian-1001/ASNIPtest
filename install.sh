@@ -11,7 +11,7 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC='\033[0m'
 BOLD='\033[1m'
 
-VERSION="v1.0.11"
+VERSION="v1.0.12"
 
 logo() {
     echo -e "${CYAN}${BOLD}"
@@ -157,9 +157,9 @@ do_install() {
     info "cf-scanner 编译完成"
 
     # 注册快捷命令
-    WRAPPER="/usr/local/bin/asniptest"
-    info "注册快捷命令 asniptest → $WRAPPER"
-    cat > "/tmp/asniptest_wrapper" << 'WRAPEOF'
+    WRAPPER="/usr/local/bin/cmtjd"
+    info "注册快捷命令 cmtjd → $WRAPPER"
+    cat > "/tmp/cmtjd_wrapper" << 'WRAPEOF'
 #!/usr/bin/env bash
 PROJECT_DIR="$HOME/ASNIPtest"
 case "${1:-}" in
@@ -169,11 +169,11 @@ case "${1:-}" in
     *)         exec python3 "$PROJECT_DIR/run.py" "$@" ;;
 esac
 WRAPEOF
-    $SUDO mv "/tmp/asniptest_wrapper" "$WRAPPER"
+    $SUDO mv "/tmp/cmtjd_wrapper" "$WRAPPER"
     $SUDO chmod +x "$WRAPPER"
-    info "快捷命令已就绪: asniptest [ASN...]      (运行扫描)"
-    info "                  asniptest update         (更新)"
-    info "                  asniptest uninstall      (卸载)"
+    info "快捷命令已就绪: cmtjd                   (输入 ASN 扫描)"
+    info "                  cmtjd update            (更新)"
+    info "                  cmtjd uninstall         (卸载)"
 
     echo ""
     echo -e "${GREEN}${BOLD}✅ 安装完成，开始运行${NC}"
