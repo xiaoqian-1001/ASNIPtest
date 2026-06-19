@@ -172,14 +172,24 @@ def parse_ports(port_str):
         part = part.strip()
         if not part:
             continue
-        if '-' in part:
-            a, b = part.split('-', 1)
-            ports.update(str(p) for p in range(int(a), int(b) + 1))
-        elif part.isdigit():
-            ports.add(part)
+        try:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                pa, pb = int(a), int(b)
+                if pa < 1 or pb > 65535 or pa > pb:
+                    continue
+                ports.update(str(p) for p in range(pa, pb + 1))
+            elif part.isdigit():
+                p = int(part)
+                if 1 <= p <= 65535:
+                    ports.add(part)
+        except ValueError:
+            continue
     return ",".join(sorted(ports, key=int)) if ports else ""
 def run_masscan(ports_str=None):
-    ports = ports_str if ports_str else ",".join(line.strip() for line in open(BASE / "ports.txt") if line.strip() and not line.startswith("#"))
+    ports = ports_str if ports_str else DEFAULT_PORTS
+    if not ports or ports == ",":
+        ports = DEFAULT_PORTS
     result_file = BASE / "masscan_result.txt"
     ip_file = BASE / "ips.txt"
 
@@ -270,7 +280,6 @@ def cf_scan():
     for line in proc.stdout:
         m = re.search(r"Scanned\s+\d+/(\d+)\s+\((\d+\.?\d*)%\)", line)
         if m:
-            total_ips = int(m.group(1))
             pct = min(float(m.group(2)), 100)
             if abs(pct - last_pct) >= 0.5:
                 filled = int(bar_width * pct / 100)
@@ -470,6 +479,9 @@ if __name__ == "__main__":
                 i += 1
         raw = ",".join(asn_args)
         asns = [a.strip().replace("AS", "").replace("as", "") for a in raw.replace("，", ",").split(",") if a.strip()]
+        if not asns:
+            print("用法: cmtjd AS209242 或 cmtjd AS209242 -p 8443")
+            sys.exit(1)
     print(f"\n  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
 
     # ── 端口选择 ──
