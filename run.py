@@ -160,9 +160,26 @@ def expand_ips():
     print(f"  展开 {total:,} 个 IP")
     return total
 
-# ── Step 3: masscan 端口扫描 ──
-def run_masscan():
-    ports = ",".join(line.strip() for line in open(BASE / "ports.txt") if line.strip() and not line.startswith("#"))
+# ── 端口解析 ──
+with open(BASE / "ports.txt") as f:
+    _default_ports = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+DEFAULT_PORTS = ",".join(_default_ports)
+
+def parse_ports(port_str):
+    """解析端口字符串: 443 或 8443-8550 或 443,8443,2053-2096"""
+    ports = set()
+    for part in port_str.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            a, b = part.split('-', 1)
+            ports.update(str(p) for p in range(int(a), int(b) + 1))
+        elif part.isdigit():
+            ports.add(part)
+    return ",".join(sorted(ports, key=int)) if ports else ""
+def run_masscan(ports_str=None):
+    ports = ports_str if ports_str else ",".join(line.strip() for line in open(BASE / "ports.txt") if line.strip() and not line.startswith("#"))
     result_file = BASE / "masscan_result.txt"
     ip_file = BASE / "ips.txt"
 
@@ -390,15 +407,46 @@ if __name__ == "__main__":
             sys.exit(1)
         asns = [a.strip().replace("AS", "").replace("as", "") for a in raw.replace("，", ",").split(",") if a.strip()]
     else:
-        # 支持: python3 run.py AS3214,AS906 或 python3 run.py AS3214 AS906
-        raw = ",".join(sys.argv[1:])
+        # 支持: python3 run.py AS3214,AS906 或 python3 run.py AS3214 AS906 [-p 端口]
+        args = sys.argv[1:]
+        # 过滤 -p 及其参数
+        i = 0
+        asn_args = []
+        while i < len(args):
+            if args[i] == "-p":
+                i += 2  # 跳过 -p 和它的参数
+            else:
+                asn_args.append(args[i])
+                i += 1
+        raw = ",".join(asn_args)
         asns = [a.strip().replace("AS", "").replace("as", "") for a in raw.replace("，", ",").split(",") if a.strip()]
     print(f"\n  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
+
+    # ── 端口选择 ──
+    scan_ports = DEFAULT_PORTS
+    if len(sys.argv) < 2:
+        print(f"  默认端口: {DEFAULT_PORTS}")
+        try:
+            port_input = input("  回车使用默认，或输入自定义端口 (如 443 或 8443-8550): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            port_input = ""
+        if port_input:
+            parsed = parse_ports(port_input)
+            if parsed:
+                scan_ports = parsed
+                print(f"  扫描端口: {scan_ports}")
+    else:
+        # 命令行模式支持 -p 参数
+        for i, arg in enumerate(sys.argv[1:], 1):
+            if arg == "-p" and i < len(sys.argv) - 1:
+                scan_ports = parse_ports(sys.argv[i+1])
+                print(f"  自定义端口: {scan_ports}")
+                break
 
     steps = [
         ("1/6 ASN→CIDR", lambda: fetch_prefixes(asns)),
         ("2/6 CIDR→IP",  expand_ips),
-        ("3/6 masscan",   run_masscan),
+        ("3/6 masscan",   lambda: run_masscan(scan_ports)),
         ("4/6 cf-scanner", cf_scan),
         ("5/6 API精筛",   api_verify),
     ]
