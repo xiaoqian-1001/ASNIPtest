@@ -21,8 +21,90 @@ def detect_hardware():
         mem_mb = 512
     return cpu, mem_mb
 
+
+# ── 智能 masscan 速率探测 ──
+def probe_masscan_rate():
+    """实测网卡发包上限，返回最优速率"""
+    # 找外网网卡
+    iface = None
+    try:
+        r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
+                           capture_output=True, text=True, timeout=5)
+        m = re.search(r"dev\s+(\S+)", r.stdout)
+        if m:
+            iface = m.group(1)
+    except Exception:
+        pass
+    if not iface:
+        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5"]:
+            if os.path.exists(f"/sys/class/net/{name}/statistics/tx_packets"):
+                iface = name
+                break
+    if not iface:
+        # 回退 CPU 估算
+        cores = multiprocessing.cpu_count()
+        return max(1000, min(cores * 1000, 16000))
+
+    # 从脚本参数取 CIDR 做样本；兜底用公共网段
+    cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
+    if not cidrs:
+        cidrs = ["1.1.1.0/24", "8.8.8.0/24", "9.9.9.0/24"]
+    sample = cidrs[:50]
+    tmp_cidr = "/tmp/.masscan_rate_test"
+    with open(tmp_cidr, "w") as f:
+        f.write("\n".join(sample))
+
+    best_rate = 2000
+    test_rate = 1000
+    max_test = 200000
+    probe_sec = 8
+
+    while test_rate <= max_test:
+        try:
+            with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
+                tx_before = int(f.read().strip())
+        except Exception:
+            break
+
+        proc = subprocess.Popen(
+            ["masscan", "-iL", tmp_cidr, "-p", "443",
+             "--rate", str(test_rate), "-oX", "/dev/null"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        time.sleep(probe_sec)
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+
+        try:
+            with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
+                tx_after = int(f.read().strip())
+        except Exception:
+            break
+
+        actual_pps = (tx_after - tx_before) / probe_sec
+        ratio = actual_pps / test_rate
+
+        if ratio >= 0.7:
+            best_rate = test_rate
+            test_rate *= 2
+        elif ratio >= 0.3:
+            best_rate = max(2000, int(actual_pps * 0.8))
+            break
+        else:
+            break
+
+    try:
+        os.remove(tmp_cidr)
+    except Exception:
+        pass
+    return best_rate
+
+
 CPU_CORES, RAM_MB = detect_hardware()
-MASSCAN_RATE    = CPU_CORES * 1000
+MASSCAN_RATE    = probe_masscan_rate()
 CF_SCANNER_CONC = max(200, min(CPU_CORES * 100, 500))
 API_CONCURRENT  = min(CPU_CORES * 16, 32)
 API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
