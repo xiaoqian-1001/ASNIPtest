@@ -191,6 +191,13 @@ def detect_isp():
 
 GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
 
+# 国内运营商链路限速：网卡能发多少 ≠ 运营商能放多少
+# 家宽上行通常 20-50Mbps，但运营商会限速大量 raw SYN 包
+# 未知地区也保守限制，避免不慎打满运营商链路
+if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 8000:
+    print(f"  ⚠ 国内运营商链路，masscan 速率从 {MASSCAN_RATE}pps 降至 8000pps")
+    MASSCAN_RATE = 8000
+
 BASE      = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
