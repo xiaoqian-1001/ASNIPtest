@@ -2,9 +2,7 @@ cf-scanner
 __pycache__/
 *.pyc
 *.csv
-cidrs.txt
-ips.txt
-masscan_result.txt
-cf_hits.txt
-verified.txt
+*.txt
+!ports.txt
+!requirements.txt
 scanner.state
