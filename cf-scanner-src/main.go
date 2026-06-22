@@ -85,15 +85,17 @@ func loadLines(path string) ([]string, int, error) {
 	var lines []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		if line := scanner.Text(); line != "" {
-			lines = append(lines, line)
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
+		lines = append(lines, line)
 	}
 	return lines, len(lines), scanner.Err()
 }
 
-func writeState(path, inputFile string, scanned int) {
-	_ = os.WriteFile(path, []byte(fmt.Sprintf("%s\t%d", inputFile, scanned)), 0644)
+func writeState(path, inputFile string, scanned int) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%s\t%d", inputFile, scanned)), 0644)
 }
 
 func main() {
@@ -199,7 +201,7 @@ func main() {
 				}
 				if n%1000 == 0 {
 					stateMu.Lock()
-					writeState(*stateFile, *inputFile, skip+int(n))
+					_ = writeState(*stateFile, *inputFile, skip+int(n))
 					stateMu.Unlock()
 				}
 			}
@@ -209,9 +211,11 @@ func main() {
 	go func() {
 		for r := range results {
 			hitCount.Add(1)
-			fmt.Fprintln(out, r.line)
-			out.Sync()
+			if _, err := fmt.Fprintln(out, r.line); err != nil {
+				fmt.Fprintf(os.Stderr, "Write error: %v\n", err)
+			}
 		}
+		out.Sync()
 	}()
 
 	startTime := time.Now()
@@ -246,7 +250,7 @@ func main() {
 			select {
 			case jobs <- line:
 			case <-ctx.Done():
-				break
+				return
 			}
 		}
 		close(jobs)
@@ -256,7 +260,7 @@ func main() {
 	close(results)
 	close(done)
 
-	writeState(*stateFile, *inputFile, int(total))
+	_ = writeState(*stateFile, *inputFile, int(total))
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\r\033[KDone! %d/%d (100%%) | %s | hits=%d\n",

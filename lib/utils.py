@@ -8,6 +8,7 @@ import time
 import signal
 import socket
 import json
+import ipaddress
 import subprocess
 import urllib.request
 import urllib.error
@@ -67,10 +68,9 @@ def _try_dns_ip(cmd: list[str], timeout: int) -> Optional[str]:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         out = r.stdout.strip().strip('"')
-        if out and "." in out and out.count(".") == 3:
-            parts = out.split(".")
-            if all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-                return out
+        if out:
+            ipaddress.ip_address(out)
+            return out
     except Exception:
         pass
     return None
@@ -78,28 +78,30 @@ def _try_dns_ip(cmd: list[str], timeout: int) -> Optional[str]:
 
 def get_public_ip() -> str:
     with ThreadPoolExecutor(max_workers=len(_HTTP_APIS)) as ex:
-        futures = {ex.submit(_try_http_ip, url, t): url for url, t in _HTTP_APIS}
+        futures = [ex.submit(_try_http_ip, url, t) for url, t in _HTTP_APIS]
         for f in as_completed(futures):
             ip = f.result()
             if ip:
                 return ip
-    for cmd, t in _DNS_QUERIES:
-        ip = _try_dns_ip(cmd, t)
-        if ip:
-            return ip
+    with ThreadPoolExecutor(max_workers=len(_DNS_QUERIES)) as ex:
+        futures = [ex.submit(_try_dns_ip, cmd, t) for cmd, t in _DNS_QUERIES]
+        for f in as_completed(futures):
+            ip = f.result()
+            if ip:
+                return ip
     return "127.0.0.1"
 
 
 def get_lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(2)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+    finally:
+        s.close()
 
 
 # ── ISP/运营商检测 ──
@@ -176,20 +178,25 @@ def port_is_free(port: int) -> bool:
 
 
 def kill_port_process(port: int) -> bool:
-    for tool in (["ss", "-tlnp", f"sport = :{port}"],
-                 ["lsof", "-ti", f":{port}"]):
-        try:
-            r = subprocess.run(tool, capture_output=True, text=True, timeout=5)
-            for line in r.stdout.split("\n"):
-                pid_match = re.search(r"pid=(\d+)", line)
-                if pid_match:
-                    os.kill(int(pid_match.group(1)), signal.SIGTERM)
-                    time.sleep(0.3)
-                    return True
-                if line.strip().isdigit():
-                    os.kill(int(line.strip()), signal.SIGTERM)
-                    time.sleep(0.3)
-                    return True
-        except Exception:
-            continue
+    try:
+        r = subprocess.run(["ss", "-tlnp", f"sport = :{port}"],
+                           capture_output=True, text=True, timeout=5)
+        for line in r.stdout.split("\n"):
+            pid_match = re.search(r"pid=(\d+)", line)
+            if pid_match:
+                os.kill(int(pid_match.group(1)), signal.SIGTERM)
+                time.sleep(0.3)
+                return True
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["lsof", "-ti", f":{port}"],
+                           capture_output=True, text=True, timeout=5)
+        for line in r.stdout.split("\n"):
+            if line.strip().isdigit():
+                os.kill(int(line.strip()), signal.SIGTERM)
+                time.sleep(0.3)
+                return True
+    except Exception:
+        pass
     return False

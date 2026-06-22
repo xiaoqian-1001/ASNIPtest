@@ -35,7 +35,14 @@ BASE = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY = BASE / "verify.py"
 API_URL = "https://api.090227.xyz/check"
-VERSION = (BASE / "VERSION").read_text().strip() if (BASE / "VERSION").is_file() else "unknown"
+_version = "unknown"
+try:
+    _vp = BASE / "VERSION"
+    if _vp.is_file():
+        _version = _vp.read_text().strip()
+except OSError:
+    pass
+VERSION = _version
 
 
 @dataclass
@@ -98,6 +105,7 @@ def probe_masscan_rate() -> int:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
 
             try:
                 with open(tx_path) as f:
@@ -231,7 +239,10 @@ def step_masscan(cfg: ScannerConfig) -> int:
         if "permission denied" in err or "init: failed" in err:
             print("  [FAIL] masscan 需要 raw socket 权限，NAT 容器/部分 VPS 不支持")
             print("  -> 请换到 KVM VPS 或物理机运行")
-        raise subprocess.CalledProcessError(proc.returncode, cmd)
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd,
+            output=None,
+            stderr="".join(stderr_lines))
 
     write_progress_done()
 
@@ -283,7 +294,8 @@ def step_cf_scan(cfg: ScannerConfig) -> int:
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     write_progress_done()
-    hits = sum(1 for _ in open(hits_file))
+    with open(hits_file) as f:
+        hits = sum(1 for _ in f)
     print(f"  CF 节点: {hits}")
     return hits
 
@@ -307,7 +319,8 @@ def step_api_verify(cfg: ScannerConfig) -> int:
         "--concurrent", str(cfg.api_concurrency),
     ], check=True)
 
-    passed = sum(1 for _ in open(verified_file))
+    with open(verified_file) as f:
+        passed = sum(1 for _ in f)
     print(f"  精筛通过: {passed}")
     return passed
 
@@ -318,8 +331,9 @@ def step_speed_test(cfg: ScannerConfig) -> None:
         print("  无节点，跳过")
         return
 
-    lines = [l.strip() for l in open(verified_file)
-             if l.strip() and not l.startswith("#")]
+    with open(verified_file) as f:
+        lines = [l.strip() for l in f
+                 if l.strip() and not l.startswith("#")]
     if len(lines) <= 1:
         print("  无节点，跳过")
         return
@@ -358,9 +372,10 @@ def _test_one(parts: list[str]) -> tuple[str, int, float]:
     ip, port = parts[0], parts[1]
     lat = _tcp_latency(ip, int(port))
     spd = _cf_download(ip, port) if lat > 0 else 0.0
-    parts[6] = str(lat)
-    parts[7] = str(spd)
-    return ",".join(parts), lat, spd
+    result = parts[:]
+    result[6] = str(lat)
+    result[7] = str(spd)
+    return ",".join(result), lat, spd
 
 
 def _tcp_latency(ip: str, port: int) -> int:
@@ -449,8 +464,10 @@ def _serve_download(file_path: Path) -> None:
             input()
         else:
             print("  (非交互终端，按 Ctrl+C 停止服务)")
-            while server.poll() is None:
-                time.sleep(1)
+            try:
+                server.wait()
+            except KeyboardInterrupt:
+                pass
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
@@ -577,8 +594,11 @@ def main() -> None:
     for stale in ("cidrs.txt", "masscan_result.txt",
                   "cf_hits.txt", "verified.txt"):
         p = BASE / stale
-        if p.exists():
-            p.unlink()
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
 
     for label, fn in steps:
         print(f"\n  [{label}]")

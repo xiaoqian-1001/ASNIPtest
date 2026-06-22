@@ -6,6 +6,7 @@ API 精筛 -- CF 反代节点二次验证
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -47,8 +48,8 @@ def _check_one(ip_port: str, api_url: str) -> Optional[str]:
         if not data.get("success"):
             return None
 
-        pr = data.get("probe_results", {})
-        ei = pr.get("ipv4", {}).get("exit") or pr.get("ipv6", {}).get("exit") or {}
+        pr = data.get("probe_results") or {}
+        ei = (pr.get("ipv4") or {}).get("exit") or (pr.get("ipv6") or {}).get("exit") or {}
         colo = ei.get("colo", data.get("colo", ""))
         country = ei.get("country", "")
         region = ei.get("region", "")
@@ -60,6 +61,9 @@ def _check_one(ip_port: str, api_url: str) -> Optional[str]:
 
 def _read_input(path: str) -> list[str]:
     lines: list[str] = []
+    if not os.path.isfile(path):
+        print(f"  输入文件不存在: {path}")
+        return lines
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -94,13 +98,15 @@ def main() -> None:
         for i in range(0, total, args.chunk):
             chunk = lines[i:i + args.chunk]
             with ThreadPoolExecutor(max_workers=args.concurrent) as ex:
-                fmap = {ex.submit(_check_one, ip, args.api): ip for ip in chunk}
-                for f in as_completed(fmap):
+                futures = [ex.submit(_check_one, ip, args.api) for ip in chunk]
+                for f in as_completed(futures):
                     r = f.result()
                     if r:
                         out.write(r + "\n")
-                        out.flush()
                         passed += 1
+                        if passed % 100 == 0:
+                            out.flush()
+            out.flush()
 
             elapsed = time.time() - start
             done = i + len(chunk)

@@ -12,6 +12,12 @@ PROJECT_DIR="$HOME/ASNIPtest"
 REPO_URL="https://github.com/xiaoqian-1001/ASNIPtest.git"
 VERSION_FILE="$PROJECT_DIR/VERSION"
 
+if [ "$(id -u)" = "0" ]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
 read_version() { cat "$VERSION_FILE" 2>/dev/null || echo "unknown"; }
 
 logo() {
@@ -39,6 +45,12 @@ go_required_version() {
 # ── 卸载 ──
 do_uninstall() {
     echo ""
+    echo -e "${YELLOW}确认卸载 ASNIPtest？此操作不可撤销。${NC}"
+    read -rp "  输入 yes 确认: " confirm
+    if [ "$confirm" != "yes" ]; then
+        info "已取消"
+        return 0
+    fi
     for d in "$PROJECT_DIR" "$HOME/cf-ip-scanner.tmp"; do
         [ -d "$d" ] && rm -rf "$d" && info "已删除 $d"
     done
@@ -91,10 +103,12 @@ ensure_go() {
 
     info "安装 Go $go_ver ..."
     local downloaded=false
+    local go_tmp
+    go_tmp=$(mktemp /tmp/go.XXXXXX.tar.gz)
     for url in \
         "https://golang.google.cn/dl/go${go_ver}.${go_arch}.tar.gz" \
         "https://go.dev/dl/go${go_ver}.${go_arch}.tar.gz"; do
-        if curl -fsSL --connect-timeout 10 "$url" -o /tmp/go.tar.gz 2>/dev/null; then
+        if curl -fsSL --connect-timeout 10 "$url" -o "$go_tmp" 2>/dev/null; then
             downloaded=true; break
         fi
         warn "  下载失败: $url"
@@ -102,12 +116,13 @@ ensure_go() {
     $downloaded || { warn "Go 下载失败"; exit 1; }
 
     $SUDO rm -rf /usr/local/go
-    $SUDO tar -C /usr/local -xzf /tmp/go.tar.gz
-    rm -f /tmp/go.tar.gz
+    $SUDO tar -C /usr/local -xzf "$go_tmp"
+    rm -f "$go_tmp"
     export PATH="/usr/local/go/bin:$PATH"
     for rc in "$HOME/.profile" "$HOME/.bashrc"; do
-        grep -q '/usr/local/go/bin' "$rc" 2>/dev/null || \
+        if [ -f "$rc" ] && ! grep -q '/usr/local/go/bin' "$rc" 2>/dev/null; then
             echo 'export PATH="/usr/local/go/bin:$PATH"' >> "$rc"
+        fi
     done
     info "Go $go_ver 完成"
 }
@@ -150,7 +165,6 @@ build_cf_scanner() {
 do_install() {
     logo
     [ "$(uname -s)" = "Linux" ] || { warn "仅支持 Linux"; exit 1; }
-    [ "$(id -u)" = "0" ] && SUDO="" || SUDO="sudo"
 
     for d in "$HOME/cf-ip-scanner.tmp" "$PROJECT_DIR.tmp"; do
         [ -d "$d" ] && { warn "清理: $d"; rm -rf "$d"; }
@@ -187,7 +201,9 @@ do_install() {
 
     local w="/usr/local/bin/xiaoqian"
     info "注册快捷命令 -> $w"
-    cat > "/tmp/xiaoqian_wrapper" << 'WEOF'
+    local wrapper
+    wrapper=$(mktemp /tmp/xiaoqian_wrapper.XXXXXX)
+    cat > "$wrapper" << 'WEOF'
 #!/usr/bin/env bash
 D="$HOME/ASNIPtest"
 case "${1:-}" in
@@ -197,7 +213,10 @@ case "${1:-}" in
     *)         exec python3 "$D/run.py" "$@" ;;
 esac
 WEOF
-    $SUDO mv "/tmp/xiaoqian_wrapper" "$w"
+    $SUDO mv "$wrapper" "$w" || {
+        warn "无法安装快捷命令到 $w"
+        warn "请手动运行: python3 $PROJECT_DIR/run.py"
+    }
     $SUDO chmod +x "$w"
     info "命令: xiaoqian [ASN...] [-p PORTS] [-s]"
     info "       xiaoqian update / uninstall"
