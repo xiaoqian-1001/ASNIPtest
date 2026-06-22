@@ -179,7 +179,10 @@ def run_masscan(ports_str=None):
 
 # ── Step 3: cf-scanner ──
 def cf_scan():
-    scanner = shutil.which("cf-scanner") or shutil.which("cf-scanner-go")
+    scanner = (shutil.which("cf-scanner") or shutil.which("cf-scanner-go") or
+               shutil.which(str(BASE / "cf-scanner")) or
+               shutil.which("/mnt/nas/projects/cf-scanner/cf-scanner") or
+               shutil.which("/mnt/nas/projects/MultiScan/worker/cf-scanner"))
     if scanner:
         cmd = [scanner, "-i", str(BASE / "cidrs.txt"), "-p",
                str(BASE / "masscan_result.txt"), "-o", str(BASE / "ips.txt")]
