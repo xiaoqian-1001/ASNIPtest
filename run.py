@@ -184,8 +184,25 @@ def cf_scan():
                shutil.which("/mnt/nas/projects/cf-scanner/cf-scanner") or
                shutil.which("/mnt/nas/projects/MultiScan/worker/cf-scanner"))
     if scanner:
-        cmd = [scanner, "-i", str(BASE / "cidrs.txt"), "-p",
-               str(BASE / "masscan_result.txt"), "-o", str(BASE / "ips.txt")]
+        # 从 masscan 结果提取 IP
+        masscan_file = BASE / "masscan_result.txt"
+        ip_list = BASE / "cf_input_ips.txt"
+        ports_found = set()
+        with open(masscan_file) as f, open(ip_list, "w") as out:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 4 and parts[0] == "open":
+                    out.write(f"{parts[3]}\n")
+                    ports_found.add(parts[2])
+
+        if not ports_found:
+            print("  ⚠ masscan 无结果，跳过 cf-scanner")
+            return
+
+        # 用最常见的端口（或默认端口）
+        scan_port = sorted(ports_found, key=int)[0]
+        cmd = [scanner, "-i", str(ip_list), "-p", scan_port,
+               "-o", str(BASE / "ips.txt")]
         subprocess.run(cmd, check=True)
     else:
         # 回退：直接用 masscan 结果，过滤非 CF IP
