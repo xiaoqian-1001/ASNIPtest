@@ -661,6 +661,23 @@ if __name__ == "__main__":
                 print(f"  自定义端口: {scan_ports}")
                 break
 
+    # ── 交互模式挂机询问 ──
+    if len(sys.argv) < 2:
+        try:
+            bg_choice = input("  挂机运行？(y/n，默认n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            bg_choice = ""
+        if bg_choice == "y":
+            bg_cmd = [sys.executable, __file__, "--bg"] + [f"AS{a}" for a in asns]
+            if scan_ports != DEFAULT_PORTS:
+                bg_cmd += ["-p", scan_ports]
+            print(f"  ↪ {' '.join(bg_cmd)}")
+            subprocess.Popen(bg_cmd, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            print(f"  ✅ 已挂机\n")
+            sys.exit(0)
+
     steps = [
         ("1/6 ASN→CIDR", lambda: fetch_prefixes(asns)),
         ("2/6 masscan",   lambda: run_masscan(scan_ports)),
