@@ -566,7 +566,8 @@ def main() -> None:
         epilog="示例:\n"
                "  xiaoqian AS209242\n"
                "  xiaoqian AS209242,AS3214\n"
-               "  xiaoqian AS209242 -p 443,8443")
+               "  xiaoqian AS209242 -p 443,8443\n"
+               "  xiaoqian AS209242 -w -s")
     parser.add_argument("asns", nargs="*", help="ASN 编号 (可多个，空格或逗号分隔)")
     parser.add_argument("-p", "--ports", metavar="PORTS",
                         help="自定义扫描端口 (如 443 或 80,443 或 8000-9000)")
@@ -598,13 +599,17 @@ def main() -> None:
         cfg.masscan_rate = max(500, cfg.masscan_rate // 4)
         print(f"  宽端口模式: {len(WIDE_PORTS.split(','))} 段 ({cfg.masscan_rate} pps)")
     elif not sys.argv[1:] and not a.asns:
-        # 交互模式：可选自定义端口
         print(f"  默认端口: {cfg.scan_ports}")
+        print(f"  宽端口: {WIDE_PORTS}")
         try:
-            inp = input("  回车使用默认，或输入自定义端口: ").strip()
+            inp = input("  回车默认 / w=宽端口 / 或输入自定义: ").strip()
         except (EOFError, KeyboardInterrupt):
             inp = ""
-        if inp:
+        if inp.lower() == "w":
+            cfg.scan_ports = WIDE_PORTS
+            cfg.masscan_rate = max(500, cfg.masscan_rate // 4)
+            print(f"  宽端口模式 ({cfg.masscan_rate} pps)")
+        elif inp:
             parsed = parse_ports(inp)
             if parsed:
                 cfg.scan_ports = parsed
