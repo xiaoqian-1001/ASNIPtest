@@ -8,24 +8,6 @@ import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time,
 from pathlib import Path
 from datetime import datetime
 
-BASE = Path(__file__).resolve().parent
-
-# ── 挂机模式：nohup 后台运行（放最前面，跳过硬件探测等耗时初始化） ──
-if "--bg" in sys.argv and sys.argv.index("--bg") == 1:
-    args = [a for a in sys.argv[1:] if a != "--bg"]
-    if not args:
-        print("用法: cmtjd --bg AS209242")
-        sys.exit(1)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    asn_tag = "_".join(a.replace("AS", "").replace("as", "") for a in args if not a.startswith("-"))
-    logfile = str(BASE / f"scan_{asn_tag}_{ts}.log")
-    p = subprocess.Popen(["nohup", sys.executable, sys.argv[0]] + args,
-                         stdout=open(logfile, "w"), stderr=subprocess.STDOUT,
-                         start_new_session=True)
-    print(f"  ✅ 已挂机 (PID {p.pid}) → {os.path.basename(logfile)}")
-    print(f"  查看: tail -f {logfile}")
-    sys.exit(0)
-
 # ── 自适应硬件 ──
 def detect_hardware():
     cpu = multiprocessing.cpu_count()
@@ -216,6 +198,7 @@ if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 8000:
     print(f"  ⚠ 国内运营商链路，masscan 速率从 {MASSCAN_RATE}pps 降至 8000pps")
     MASSCAN_RATE = 8000
 
+BASE      = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
 API_URL    = "https://api.090227.xyz/check"
@@ -594,7 +577,6 @@ def output_csv(asns):
 
 # ── Main ──
 if __name__ == "__main__":
-
     if len(sys.argv) < 2:
         try:
             raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
