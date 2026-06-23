@@ -2,155 +2,133 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
-	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
-const version = "1.4.0"
-
 var (
-	inputFile   = flag.String("i", "", "IP:port list file (required)")
-	outputFile  = flag.String("o", "", "Output file (default: cf_hits_<timestamp>.txt)")
+	inputFile   = flag.String("i", "", "IP list file (required)")
+	outputFile  = flag.String("o", "", "Output file for CF proxy hits (default: cf_hits_<timestamp>.txt)")
 	stateFile   = flag.String("state", "scanner.state", "Checkpoint file for resume")
 	concurrency = flag.Int("c", 500, "Concurrent connections")
 	connectTO   = flag.Duration("connect-timeout", 1500*time.Millisecond, "TCP+TLS connect timeout")
-	totalTO     = flag.Duration("timeout", 2*time.Second, "Total request timeout")
-	port        = flag.String("p", "443", "Default target port")
+	port        = flag.String("p", "443", "Target port")
 	sni         = flag.String("sni", "cloudflare.com", "TLS SNI to send")
-	hostHdr     = flag.String("host", "www.cloudflare.com", "HTTP Host header")
-	showVersion = flag.Bool("version", false, "Print version and exit")
 )
 
-type result struct {
-	line string
-}
-
-func isCloudflareProxy(ip string, client *http.Client) (bool, string) {
+func isCloudflareProxy(ip string) (bool, string) {
 	targetHost, targetPort := ip, *port
 	if h, p, err := net.SplitHostPort(ip); err == nil {
 		targetHost, targetPort = h, p
 	}
 	target := net.JoinHostPort(targetHost, targetPort)
 
-	ctx, cancel := context.WithTimeout(context.Background(), *totalTO)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://"+target+"/", nil)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: *connectTO}, "tcp", target, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         *sni,
+	})
 	if err != nil {
 		return false, target
 	}
-	req.Host = *hostHdr
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.Close = true
+	defer conn.Close()
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, target
-	}
-	defer resp.Body.Close()
-
-	serverHeader := resp.Header.Get("Server")
-	cfRay := resp.Header.Get("CF-RAY")
-	if serverHeader == "cloudflare" || cfRay != "" {
-		reason := fmt.Sprintf("status=%d", resp.StatusCode)
-		if serverHeader == "cloudflare" {
-			reason += " server=cloudflare"
+	certs := conn.ConnectionState().PeerCertificates
+	for _, cert := range certs {
+		if strings.Contains(cert.Subject.CommonName, "cloudflare.com") {
+			return true, target
 		}
-		if cfRay != "" {
-			reason += " cf-ray=" + cfRay[:min(len(cfRay), 30)]
+		for _, name := range cert.DNSNames {
+			if strings.Contains(name, "cloudflare.com") {
+				return true, target
+			}
 		}
-		return true, fmt.Sprintf("%s  %s", target, reason)
 	}
 	return false, target
 }
 
-func loadLines(path string) ([]string, int, error) {
+func countLines(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
+	}
+	defer f.Close()
+	count := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if scanner.Text() != "" {
+			count++
+		}
+	}
+	return count, scanner.Err()
+}
+
+func streamLines(path string, skip int, out chan<- string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
 	defer f.Close()
 
-	var lines []string
 	scanner := bufio.NewScanner(f)
+	lineNum := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
 			continue
 		}
-		lines = append(lines, line)
+		lineNum++
+		if lineNum <= skip {
+			continue
+		}
+		out <- line
 	}
-	return lines, len(lines), scanner.Err()
-}
-
-func writeState(path, inputFile string, scanned int) error {
-	return os.WriteFile(path, []byte(fmt.Sprintf("%s\t%d", inputFile, scanned)), 0644)
+	return scanner.Err()
 }
 
 func main() {
 	flag.Parse()
-
-	if *showVersion {
-		fmt.Printf("cf-scanner %s\n", version)
-		os.Exit(0)
-	}
 	if *inputFile == "" {
 		fmt.Fprintln(os.Stderr, "Usage: cf-scanner -i ips.txt [-o hits.txt] [-c 500]")
-		fmt.Fprintf(os.Stderr, "       cf-scanner --version\n")
 		os.Exit(1)
 	}
 
+	// Auto-generate output filename with timestamp if not specified
 	if *outputFile == "" {
 		*outputFile = fmt.Sprintf("cf_hits_%s.txt", time.Now().Format("20060102_150405"))
 	}
 	fmt.Printf("Output: %s\n", *outputFile)
 
+	// Count total lines (fast, low memory)
+	fmt.Print("Counting IPs... ")
+	total, err := countLines(*inputFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nFailed to read %s: %v\n", *inputFile, err)
+		os.Exit(1)
+	}
+	fmt.Printf("%d\n", total)
+
+	// Checkpoint resume (state format: input_file<TAB>skip)
 	skip := 0
 	if data, err := os.ReadFile(*stateFile); err == nil {
 		parts := strings.SplitN(strings.TrimSpace(string(data)), "\t", 2)
 		if len(parts) == 2 && parts[0] == *inputFile {
 			fmt.Sscanf(parts[1], "%d", &skip)
+			if skip > 0 && skip < total {
+				fmt.Printf("Resuming from line %d (%.1f%% done)\n", skip, float64(skip)/float64(total)*100)
+			} else {
+				skip = 0
+			}
+		} else {
+			fmt.Printf("State file is for %q, not %q — starting fresh\n", parts[0], *inputFile)
 		}
-	}
-
-	fmt.Print("Loading... ")
-	allLines, totalCount, err := loadLines(*inputFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nFailed: %v\n", err)
-		os.Exit(1)
-	}
-	if skip > totalCount {
-		skip = 0
-	}
-	fmt.Printf("%d total", totalCount)
-	if skip > 0 {
-		fmt.Printf(" (resume from %d)", skip)
-	}
-	fmt.Println()
-
-	feed := allLines
-	if skip > 0 && skip < len(allLines) {
-		feed = allLines[skip:]
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         *sni,
-		},
-		DialContext:       (&net.Dialer{Timeout: *connectTO}).DialContext,
-		DisableKeepAlives: true,
 	}
 
 	out, err := os.OpenFile(*outputFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
@@ -160,68 +138,37 @@ func main() {
 	}
 	defer out.Close()
 
+	jobs := make(chan string, *concurrency*2)
+
 	var (
 		scanned  atomic.Int64
 		hitCount atomic.Int64
 		wg       sync.WaitGroup
-		stateMu  sync.Mutex
-		total    = int64(len(feed) + skip)
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nReceived %v, saving state...\n", sig)
-		writeState(*stateFile, *inputFile, skip+int(scanned.Load()))
-		cancel()
-	}()
-
-	jobs := make(chan string, *concurrency*2)
-	results := make(chan result, *concurrency)
-
-	sharedClient := &http.Client{Transport: transport, Timeout: *totalTO}
-
+	// Workers — each with independent TLS dialer
 	for i := 0; i < *concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for ip := range jobs {
-				ok, line := isCloudflareProxy(ip, sharedClient)
+				ok, target := isCloudflareProxy(ip)
 				n := scanned.Add(1)
 				if ok {
-					select {
-					case results <- result{line}:
-					case <-ctx.Done():
-						return
-					}
+					hitCount.Add(1)
+					fmt.Fprintf(out, "%s\n", target)
 				}
 				if n%1000 == 0 {
-					stateMu.Lock()
-					_ = writeState(*stateFile, *inputFile, skip+int(n))
-					stateMu.Unlock()
+					os.WriteFile(*stateFile, []byte(fmt.Sprintf("%s\t%d", *inputFile, skip+int(n))), 0644)
 				}
 			}
 		}()
 	}
 
-	go func() {
-		for r := range results {
-			hitCount.Add(1)
-			if _, err := fmt.Fprintln(out, r.line); err != nil {
-				fmt.Fprintf(os.Stderr, "Write error: %v\n", err)
-			}
-		}
-		out.Sync()
-	}()
-
+	// Progress reporter
 	startTime := time.Now()
 	startSkip := int64(skip)
 	done := make(chan struct{})
-
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -233,7 +180,7 @@ func main() {
 				n := scanned.Load()
 				elapsed := time.Since(startTime)
 				rate := float64(n) / elapsed.Seconds()
-				remain := total - startSkip - n
+				remain := int64(total) - startSkip - n
 				var eta time.Duration
 				if rate > 0 {
 					eta = time.Duration(float64(remain)/rate) * time.Second
@@ -245,22 +192,34 @@ func main() {
 		}
 	}()
 
+	// Periodic GC
+	gcDone := make(chan struct{})
 	go func() {
-		for _, line := range feed {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
 			select {
-			case jobs <- line:
-			case <-ctx.Done():
+			case <-gcDone:
 				return
+			case <-ticker.C:
+				runtime.GC()
 			}
+		}
+	}()
+
+	// Stream IPs from file (low memory)
+	go func() {
+		if err := streamLines(*inputFile, skip, jobs); err != nil {
+			fmt.Fprintf(os.Stderr, "\nError reading input: %v\n", err)
 		}
 		close(jobs)
 	}()
 
 	wg.Wait()
-	close(results)
 	close(done)
+	close(gcDone)
 
-	_ = writeState(*stateFile, *inputFile, int(total))
+	os.WriteFile(*stateFile, []byte(fmt.Sprintf("%s\t%d", *inputFile, total)), 0644)
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\r\033[KDone! %d/%d (100%%) | %s | hits=%d\n",
