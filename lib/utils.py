@@ -49,38 +49,32 @@ def c(text: str, color: str) -> str:
 # ── 美化输出 ──
 
 def print_banner() -> None:
-    """打印项目横幅 (ASCII 艺术)"""
+    """打印项目横幅"""
     try:
         vp = Path(__file__).resolve().parent.parent / "VERSION"
         ver = vp.read_text().strip() if vp.is_file() else ""
     except OSError:
         ver = ""
     tag = f" v{ver}" if ver else ""
-    
-    # ASCII 艺术横幅
-    banner = r"""
-  _____ ____  _______       _______ _
- |_   _|  _ \| ____\ \    / / ____| |_   _
-   | | | |_) |  _|  \ \  / /|  _| | | | |
-   | | |  _ <| |___  \ \/ / | |___| | |_|
-   |_| |_| \_\_____|  \__/  |_____|_|\__, |
-                                   |___/
-    """
-    
-    print(c(banner, C.C))
-    print(c(f"    IP 资产梳理工具{tag}", C.D))
-    print(c(f"    ASN -> CIDR -> 端口扫描 -> CF 节点 -> CSV", C.D))
-    print(c("  " + "=" * 50, C.C))
+    w = 50
+    print()
+    print(c("  " + "=" * w, C.C))
+    name = c(f"    IP-Tidy{tag}", C.B)
+    desc = c("    IP 资产梳理工具 -- ASN -> CIDR -> 扫描 -> CF 节点 -> CSV", C.D)
+    print(name)
+    print(desc)
+    print(c("  " + "=" * w, C.C))
     print()
 
 
 def print_step(label: str) -> None:
     """打印步骤标题 (带颜色和分隔符)"""
     sep = c("─" * 50, C.D)
-    title = c(f" {label} ", C.B + C.C)
+    plain = f" {label} "
+    title = c(plain.center(50), C.B + C.C)
     print(f"\n{sep}")
-    print(f"{title:^50}")
-    print(f"{sep}")
+    print(title)
+    print(sep)
 
 
 def print_sep(char: str = "─", color: str = C.D, width: int = 50) -> None:
@@ -98,7 +92,7 @@ def write_progress(pct: float, extra: str = "") -> None:
 
 
 def write_progress_done(extra: str = "") -> None:
-    sys.stderr.write(f"\r  [{_FILL * BAR_WIDTH}] 100.0%{extra}\n")
+    sys.stderr.write(f"\r  [{c(_FILL * BAR_WIDTH, C.G)}]  100.0%{extra}\n")
     sys.stderr.flush()
 
 
