@@ -612,6 +612,164 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
     return hits, passed
 
 
+def step_deep_scan(cfg: ScannerConfig) -> int:
+    """二阶段深度扫描: 对 CF 命中的 IP 追加宽端口扫描"""
+    hits_file = BASE / "cf_hits.txt"
+    verified_file = BASE / "verified.txt"
+
+    if not hits_file.exists() or hits_file.stat().st_size == 0:
+        print("  无 CF 节点，跳过")
+        return 0
+
+    ips: set[str] = set()
+    with open(hits_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            ips.add(line.split(":")[0] if ":" in line else line)
+
+    if not ips:
+        print("  无目标 IP，跳过")
+        return 0
+
+    # 保存已有结果 (去重 key = IP:port)
+    saved: dict[str, str] = {}
+    saved_header = "IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN"
+    if verified_file.exists() and verified_file.stat().st_size > 0:
+        with open(verified_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("IP"):
+                    saved_header = line
+                    continue
+                parts = line.split(",", 2)
+                key = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else line
+                saved[key] = line
+
+    port_count = _port_count(WIDE_PORTS)
+    print(f"\n  深度扫描: {len(ips)} 个 IP × {port_count} 端口 ({cfg.masscan_rate} pps)")
+    eta_s = max(1, port_count * len(ips) // max(1, cfg.masscan_rate))
+    print(f"  预计: {eta_s // 60}m {eta_s % 60}s ({', '.join(sorted(ips)[:5])}{'...' if len(ips) > 5 else ''})")
+
+    ip_file = BASE / "deep_ips.txt"
+    ip_file.write_text("\n".join(sorted(ips)) + "\n")
+
+    # ── masscan ──
+    xml_file = BASE / "deep_result.xml"
+    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
+
+    batches = _split_port_batches(WIDE_PORTS)
+    all_open: list[str] = []
+
+    for bi, batch_ports in enumerate(batches):
+        batch_xml = xml_file if len(batches) == 1 else BASE / f"deep_batch_{bi + 1}.xml"
+        cmd = sudo + [
+            "masscan", "-iL", str(ip_file),
+            "-p", batch_ports,
+            "--rate", str(cfg.masscan_rate),
+            "-oX", str(batch_xml),
+            "--wait", "5",
+        ]
+        prefix = f"[{bi + 1}/{len(batches)}] " if len(batches) > 1 else ""
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        stderr_lines: list[str] = []
+        t0 = time.time()
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            m = re.search(r"(\d+\.?\d*)%\s*done", line)
+            if m:
+                pct = min(float(m.group(1)), 100)
+                elapsed = time.time() - t0
+                eta = (elapsed / pct * (100 - pct)) if pct > 0 else 0
+                extra = f" | ETA {int(eta // 60)}m {int(eta % 60)}s" if pct > 0.5 else ""
+                write_progress(pct, prefix + extra)
+        proc.wait()
+
+        if proc.returncode != 0:
+            sys.stderr.write("\n"); sys.stderr.flush()
+            err = "".join(stderr_lines).lower()
+            if "permission denied" in err or "password is required" in err:
+                print("  [FAIL] masscan 权限不足")
+            raise subprocess.CalledProcessError(proc.returncode, cmd,
+                                                output=None, stderr="".join(stderr_lines))
+
+        write_progress_done(prefix)
+
+        if os.geteuid() != 0:
+            subprocess.run(["sudo", "-n", "chown",
+                            f"{os.getuid()}:{os.getgid()}", str(batch_xml)],
+                           stdin=subprocess.DEVNULL, check=False)
+
+        # 解析 XML
+        try:
+            tree = ET.parse(batch_xml)
+            for host in tree.getroot().findall("host"):
+                addr = host.find("address")
+                if addr is None:
+                    continue
+                ip_addr = addr.get("addr", "")
+                ports_elem = host.find("ports")
+                if ports_elem is None:
+                    continue
+                for port in ports_elem.findall("port"):
+                    state = port.find("state")
+                    if state is None or state.get("state") != "open":
+                        continue
+                    if state.get("reason", "") not in ("syn-ack", "synack"):
+                        continue
+                    portid = port.get("portid", "")
+                    if ip_addr and portid:
+                        all_open.append(f"{ip_addr}:{portid}")
+        except ET.ParseError:
+            pass
+
+        if len(batches) > 1:
+            try:
+                batch_xml.unlink()
+            except OSError:
+                pass
+
+    result_file = BASE / "masscan_result.txt"
+    result_file.write_text("\n".join(all_open) + "\n")
+    print(f"  新开放端口: {len(all_open)}")
+
+    if not all_open:
+        print("  无新增开放端口")
+        return len(saved)
+
+    # ── 对深度结果跑 cf-scanner + 精筛 ──
+    hits, _passed = _pipeline(cfg)
+
+    # 合并结果
+    new_set: dict[str, str] = {}
+    if verified_file.exists() and verified_file.stat().st_size > 0:
+        with open(verified_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("IP"):
+                    continue
+                parts = line.split(",", 2)
+                key = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else line
+                new_set[key] = line
+
+    merged = dict(saved)
+    for key, val in new_set.items():
+        if key not in merged:
+            merged[key] = val
+
+    result_lines = [saved_header] + list(merged.values())
+    verified_file.write_text("\n".join(result_lines) + "\n")
+
+    new_found = len(merged) - len(saved)
+    print(f"  合并结果: {len(merged)} 条 (新增 {new_found})")
+    return len(merged)
+
+
 def step_speed_test(cfg: ScannerConfig) -> None:
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -843,6 +1001,8 @@ def main() -> None:
                         help="masscan 发包速率 (默认自动探测)")
     parser.add_argument("--skip-masscan", action="store_true",
                         help="跳过 masscan，使用已有 masscan_result.txt")
+    parser.add_argument("-d", "--deep", action="store_true",
+                        help="深度扫描: 对 CF 命中的 IP 追加宽端口扫描")
     parser.add_argument("-v", "--version", action="version",
                         version=f"ASNIPtest {VERSION}")
     a = parser.parse_args()
@@ -908,22 +1068,28 @@ def main() -> None:
         do_speed = ch == "y"
     if do_speed:
         total_steps += 1
-    else:
+    if a.deep:
+        total_steps += 1
+    if not do_speed:
         print("  跳过测速\n")
 
     steps: list[tuple[str, Callable[[], object]]] = [
         ("1. ASN->CIDR", lambda: step_fetch_prefixes(cfg, asns)),
     ]
+    step_num = 1
     if a.skip_masscan:
         print("  --skip-masscan: 跳过 masscan，使用已有 masscan_result.txt")
     else:
-        steps.append(("2. masscan", lambda: step_masscan(cfg)))
-    steps.append((
-        f"{'3' if not a.skip_masscan else '2'}. 扫描+精筛",
-        lambda: _pipeline(cfg),
-    ))
+        step_num += 1
+        steps.append((f"{step_num}. masscan", lambda: step_masscan(cfg)))
+    step_num += 1
+    steps.append((f"{step_num}. 扫描+精筛", lambda: _pipeline(cfg)))
+    if a.deep:
+        step_num += 1
+        steps.append((f"{step_num}. 深度扫描", lambda: step_deep_scan(cfg)))
     if do_speed:
-        steps.append((f"{total_steps}. 测速", lambda: step_speed_test(cfg)))
+        step_num += 1
+        steps.append((f"{step_num}. 测速", lambda: step_speed_test(cfg)))
 
     # 清理上次运行的中间文件，防止残留数据污染
     for stale in ("cidrs.txt", "masscan_result.xml", "cf_hits.txt", "verified.txt"):
@@ -936,6 +1102,18 @@ def main() -> None:
     for p in BASE.glob("masscan_batch_*.xml"):
         try:
             p.unlink()
+        except OSError:
+            pass
+    for p in BASE.glob("deep_*.xml"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    for fname in ("deep_ips.txt",):
+        p = BASE / fname
+        try:
+            if p.exists():
+                p.unlink()
         except OSError:
             pass
     if not a.skip_masscan:
