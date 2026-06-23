@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 IP-Tidy -- ASN -> CIDR -> masscan -> CF 反代节点检测 -> CSV 输出
-用法: python3 run.py AS209242 [AS3214 ...] [-p PORTS]
+用法: python3 run.py AS209242 [...ASN] [-p PORTS]
+       python3 run.py 1.2.3.0/24 [...CIDR] [-p PORTS]
 """
 
 import sys
@@ -11,6 +12,7 @@ import time
 import json
 import random
 import socket
+import ipaddress
 import threading
 import argparse
 import subprocess
@@ -358,8 +360,11 @@ def _asn_cache_save(data: dict[str, Any]) -> None:
 
 # ── Pipeline Steps ──
 
-def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
-    cidrs: list[str] = []
+def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str], cidrs: list[str]) -> list[str]:
+    all_cidrs = list(cidrs)
+    if cidrs:
+        print(f"  直接 CIDR: {len(cidrs)} 个 ({', '.join(cidrs[:5])}{'...' if len(cidrs) > 5 else ''})")
+
     cache = _asn_cache_load()
     now_ts = time.time()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -368,7 +373,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
         cache_key = f"AS{asn}"
         if cache_key in cache and now_ts - cache[cache_key].get("ts", 0) < _ASN_CACHE_TTL:
             entry = cache[cache_key]
-            cidrs.extend(entry["cidrs"])
+            all_cidrs.extend(entry["cidrs"])
             age_h = (now_ts - entry["ts"]) / 3600
             print(f"  AS{asn} -> {entry['count']} 个 IPv4 CIDR (缓存, {age_h:.1f}h前)")
             continue
@@ -383,7 +388,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
             for p in data["data"]["prefixes"]:
                 if ":" not in p["prefix"]:
                     prefixes.append(p["prefix"])
-                    cidrs.append(p["prefix"])
+                    all_cidrs.append(p["prefix"])
                     count += 1
             cache[cache_key] = {"ts": now_ts, "count": count,
                                 "cidrs": prefixes, "updated": now_str}
@@ -391,18 +396,18 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
         except (urllib.error.URLError, json.JSONDecodeError, OSError,
                 KeyError) as e:
             if cache_key in cache:
-                cidrs.extend(cache[cache_key]["cidrs"])
+                all_cidrs.extend(cache[cache_key]["cidrs"])
                 print(f"  AS{asn} -> {e}, 使用上次缓存 ({cache[cache_key]['count']} CIDR)")
             else:
                 print(f"  AS{asn} -> 失败: {e}")
 
     _asn_cache_save(cache)
-    (BASE / "cidrs.txt").write_text("\n".join(cidrs))
-    print(f"  共 {len(cidrs)} 个 CIDR")
-    if not cidrs:
-        print(c("  [FAIL] 无可用 CIDR，请检查 ASN 是否正确", C.Y))
+    (BASE / "cidrs.txt").write_text("\n".join(all_cidrs))
+    print(f"  共 {len(all_cidrs)} 个 CIDR")
+    if not all_cidrs:
+        print(c("  [FAIL] 无可用 CIDR，请检查输入是否正确", C.Y))
         sys.exit(1)
-    return cidrs
+    return all_cidrs
 
 
 def _read_masscan_stderr(proc, prefix: str = "") -> list[str]:
@@ -1003,16 +1008,17 @@ def _serve_download(file_path: Path) -> None:
                 server.kill()
 
 
-def _parse_asns(raw_args: list[str]) -> list[str]:
+def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str]]:
+    """解析输入，返回 (ASN列表, CIDR列表)"""
     raw = ""
     if not raw_args:
         try:
-            raw = input(c("  输入 ASN 编号 (多个用逗号分隔): ", C.Y)).strip()
+            raw = input(c("  输入 ASN 或 CIDR (多个用逗号分隔): ", C.Y)).strip()
         except (EOFError, KeyboardInterrupt):
             try:
                 with open("/dev/tty") as tty:
                     os.dup2(tty.fileno(), 0)
-                raw = input(c("  输入 ASN 编号 (多个用逗号分隔): ", C.Y)).strip()
+                raw = input(c("  输入 ASN 或 CIDR (多个用逗号分隔): ", C.Y)).strip()
             except Exception:
                 print(f"\n  请在终端运行: cd {BASE} && python3 run.py\n")
                 sys.exit(0)
@@ -1023,15 +1029,33 @@ def _parse_asns(raw_args: list[str]) -> list[str]:
             arg = raw_args[i]
             if arg in ("-p", "-r"):
                 i += 2
-            elif arg in ("-s", "-w", "-R"):
+            elif arg in ("-s", "-w", "-R", "-d"):
                 i += 1
             else:
                 filtered.append(arg)
                 i += 1
         raw = ",".join(filtered)
 
-    return [a.strip().replace("AS", "").replace("as", "")
-            for a in raw.replace("，", ",").split(",") if a.strip()]
+    asns: list[str] = []
+    cidrs: list[str] = []
+    for item in raw.replace("，", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        # 判断是 CIDR 还是 ASN
+        if "/" in item:
+            try:
+                net = ipaddress.ip_network(item, strict=False)
+                cidrs.append(str(net))
+            except ValueError:
+                print(c(f"  [WARN] 无效 CIDR: {item}，已忽略", C.Y))
+        else:
+            asn = item.replace("AS", "").replace("as", "")
+            if asn.isdigit():
+                asns.append(asn)
+            else:
+                print(c(f"  [WARN] 无法识别: {item}，已忽略", C.Y))
+    return asns, cidrs
 
 
 def _parse_custom_port(args: list[str]) -> Optional[str]:
@@ -1053,10 +1077,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n"
                "  xiaoqian AS209242\n"
-               "  xiaoqian AS209242 -w -s\n"
-               "  xiaoqian AS209242 -p 443,8443\n"
-               "  xiaoqian AS209242 -w -r 4000")
-    parser.add_argument("asns", nargs="*", help="ASN 编号 (可多个，空格或逗号分隔)")
+                "  ip-tidy AS209242 -w -s\n"
+                "  ip-tidy AS209242 -p 443,8443\n"
+                "  ip-tidy AS209242 -w -r 4000\n"
+                "  ip-tidy 1.2.3.0/24,5.6.7.0/24")
+    parser.add_argument("targets", nargs="*", help="ASN 编号 或 CIDR (可多个，空格或逗号分隔)")
     parser.add_argument("-p", "--ports", metavar="PORTS",
                         help="自定义扫描端口 (如 443 或 80,443 或 8000-9000)")
     parser.add_argument("-s", "--speed", action="store_true",
@@ -1077,16 +1102,23 @@ def main() -> None:
 
     print_banner()
     cfg = init_runtime()
-    asns = _parse_asns(sys.argv[1:] if not a.asns else a.asns)
+    asns, cidrs = _parse_targets(sys.argv[1:] if not a.targets else a.targets)
 
-    if not asns:
-        print("用法: ip-tidy AS209242 [AS3214 ...] [-p PORTS]")
+    if not asns and not cidrs:
+        print("用法: ip-tidy AS209242 [...] 或 ip-tidy 1.2.3.0/24 [...]")
         sys.exit(1)
 
     print_hardware_info(cfg.cpu, cfg.ram_mb, cfg.masscan_rate,
                         cfg.cf_concurrency, cfg.api_concurrency,
                         cfg.global_city, cfg.global_isp)
-    print(c(f"  [已确认] 目标 ASN: {', '.join(f'AS{x}' for x in asns)}", C.G))
+
+    # 确认目标
+    targets_desc = []
+    if asns:
+        targets_desc.append(", ".join(f"AS{x}" for x in asns))
+    if cidrs:
+        targets_desc.append(", ".join(cidrs[:5]) + ("..." if len(cidrs) > 5 else ""))
+    print(c(f"  [已确认] 目标: {'; '.join(targets_desc)}", C.G))
 
     if a.rate:
         cfg.masscan_rate = max(100, a.rate)
@@ -1106,7 +1138,7 @@ def main() -> None:
     elif a.random:
         cfg.scan_ports = _random_ports()
         print(f"  随机端口: {cfg.scan_ports}")
-    elif not sys.argv[1:] and not a.asns:
+    elif not sys.argv[1:] and not a.targets:
         print(f"  默认端口: {cfg.scan_ports}")
         print(f"  宽端口: {WIDE_PORTS}")
         try:
@@ -1158,7 +1190,7 @@ def main() -> None:
         total_steps += 1
 
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("Step 1  ASN -> CIDR", lambda: step_fetch_prefixes(cfg, asns)),
+        ("Step 1  ASN -> CIDR", lambda: step_fetch_prefixes(cfg, asns, cidrs)),
     ]
     step_num = 1
     if a.skip_masscan:
@@ -1231,7 +1263,7 @@ def main() -> None:
     csv_path = None
     if verified_file.exists() and verified_file.stat().st_size > 0:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tag = "_".join(asns)
+        tag = "_".join(asns) if asns else "cidr"
         csv_path = BASE / f"output_{tag}_{ts}.csv"
 
         parsed: list[str] = []
