@@ -201,6 +201,7 @@ def probe_masscan_rate() -> int:
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample_cidrs))
 
+    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
     best_rate, test_rate, probe_sec = 2000, 1000, 8
     try:
         while test_rate <= 200000:
@@ -211,9 +212,10 @@ def probe_masscan_rate() -> int:
                 break
 
             proc = subprocess.Popen(
-                ["masscan", "-iL", tmp_cidr, "-p", "443",
-                 "--rate", str(test_rate), "-oX", "/dev/null"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                sudo + ["masscan", "-iL", tmp_cidr, "-p", "443",
+                        "--rate", str(test_rate), "-oX", "/dev/null"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL)
             time.sleep(probe_sec)
             proc.terminate()
             try:
@@ -386,7 +388,7 @@ def step_masscan(cfg: ScannerConfig) -> int:
     for bi, batch_ports in enumerate(batches):
         batch_xml = xml_file if batch_total == 1 else BASE / f"masscan_batch_{bi + 1}.xml"
 
-        sudo = [] if os.geteuid() == 0 else ["sudo"]
+        sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
         cmd = sudo + [
             "masscan", "-iL", str(ip_file),
             "-p", batch_ports,
@@ -397,6 +399,7 @@ def step_masscan(cfg: ScannerConfig) -> int:
 
         prefix = f"[{bi + 1}/{batch_total}] " if batch_total > 1 else ""
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, text=True, bufsize=1)
         stderr_lines: list[str] = []
         t0 = time.time()
@@ -417,6 +420,17 @@ def step_masscan(cfg: ScannerConfig) -> int:
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "init: failed" in err:
                 print("  [FAIL] masscan 需要 raw socket 权限")
+                if os.geteuid() != 0:
+                    print("  解决: sudo python3 run.py ...  (以 root 运行)")
+                    print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
+            elif "password is required" in err or "a password is required" in err:
+                print("  [FAIL] sudo 需要密码交互，当前环境无法输入")
+                print("  解决: sudo python3 run.py ...  (以 root 运行)")
+                print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
+            else:
+                sys.stderr.write("".join(stderr_lines))
+                sys.stderr.flush()
+                print(f"\n  [FAIL] masscan 返回码 {proc.returncode}")
             raise subprocess.CalledProcessError(
                 proc.returncode, cmd, output=None,
                 stderr="".join(stderr_lines))
@@ -424,8 +438,9 @@ def step_masscan(cfg: ScannerConfig) -> int:
         write_progress_done(prefix)
 
         if os.geteuid() != 0:
-            subprocess.run(["sudo", "chown",
-                            f"{os.getuid()}:{os.getgid()}", str(batch_xml)], check=False)
+            subprocess.run(["sudo", "-n", "chown",
+                            f"{os.getuid()}:{os.getgid()}", str(batch_xml)],
+                           stdin=subprocess.DEVNULL, check=False)
 
         # Parse batch XML
         try:
