@@ -1074,7 +1074,7 @@ def main() -> None:
     parser.add_argument("--skip-masscan", action="store_true",
                         help="跳过 masscan，使用已有 masscan_result.txt")
     parser.add_argument("-d", "--deep", action="store_true",
-                        help="深度扫描: 对 CF 命中的 IP 追加宽端口扫描")
+                        help="深度扫描: 对 CF 命中的 IP 追加 55546 个端口扫描 (发现隐藏节点)")
     parser.add_argument("-v", "--version", action="version",
                         version=f"ASNIPtest {VERSION}")
     a = parser.parse_args()
@@ -1142,10 +1142,12 @@ def main() -> None:
         do_speed = ch == "y"
     if not do_deep and not sys.argv[1:]:
         try:
-            ch = input("  是否深度扫描？(y/n，默认跳过): ").strip().lower()
+            print_sep("=", C.C)
+            ch = input(c("  ✨ 深度扫描: 对 CF 命中的 IP 追加 55546 个端口扫描 (y/n,默认跳过): ", C.B + C.C)).strip().lower()
+            print_sep("=", C.C)
+            do_deep = ch == "y"
         except (EOFError, KeyboardInterrupt):
-            ch = ""
-        do_deep = ch == "y"
+            do_deep = False
     if do_speed:
         total_steps += 1
     if do_deep:

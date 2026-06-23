@@ -1,23 +1,33 @@
-# ASNIPtest
+# IP-Tidy
 
-> ASN -> CIDR -> masscan -> Cloudflare 反代节点检测 -> CSV 输出
+> **IP 资产梳理工具**: ASN -> CIDR -> 端口扫描 -> Cloudflare 反代节点检测 -> 可用节点 CSV 导出
 
-一条命令从 ASN 编号出发，自动发现该 ASN 下所有 Cloudflare 可用节点。
+一键从 ASN 编号出发,自动发现并梳理目标 ASN 下的所有可用 Cloudflare 反代节点,输出结构化 CSV 结果。
+
+---
+
+## 特性
+- **自动化流程**: 一条命令完成从 ASN 到可用节点的全流程
+- **深度扫描**: 发现隐藏的高位端口节点
+- **断点续扫**: 支持跳过 masscan 使用已有结果
+- **硬件自适应**: 根据 CPU/内存动态调整并发
+- **多平台**: Linux/macOS/Windows 全支持
 
 ---
 
 ## 快速开始
 
 ```bash
-# 安装（自动处理所有依赖）
-curl -fsSL https://raw.githubusercontent.com/xiaoqian-1001/ASNIPtest/main/install.sh | bash
+# 安装(自动处理所有依赖)
+curl -fsSL https://raw.githubusercontent.com/xiaoqian-1001/IP-Tidy/main/install.sh | bash
 
 # 使用
-xiaoqian AS209242              # 单个 ASN
-xiaoqian AS209242,AS3214       # 多个 ASN（逗号）
-xiaoqian AS209242 -p 443,8443  # 自定义端口
-xiaoqian AS209242 -w            # 宽端口模式 (55000+ 端口)
-xiaoqian AS209242 -R            # 随机 5 端口快速探测
+ip-tidy AS209242              # 单个 ASN
+ip-tidy AS209242,AS3214       # 多个 ASN(逗号)
+ip-tidy AS209242 -p 443,8443  # 自定义端口
+ip-tidy AS209242 -w           # 宽端口模式 (55000+ 端口)
+ip-tidy AS209242 -R           # 随机 5 端口快速探测
+```
 xiaoqian AS209242 -d            # 深度扫描 (命中 IP 追加宽端口)
 xiaoqian AS209242 -s            # 扫描后自动测速
 xiaoqian AS209242 -w -d -s      # 组合使用

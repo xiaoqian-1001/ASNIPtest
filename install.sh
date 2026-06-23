@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ASNIPtest 一键安装/更新/卸载
+# IP-Tidy 一键安装/更新/卸载
 #   curl -fsSL <raw_url> | bash
 #   bash install.sh update / uninstall
 
@@ -9,7 +9,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC
 BOLD='\033[1m'
 
 PROJECT_DIR="$HOME/ASNIPtest"
-REPO_URL="https://github.com/xiaoqian-1001/ASNIPtest.git"
+REPO_URL="https://github.com/xiaoqian-1001/IP-Tidy.git"
 VERSION_FILE="$PROJECT_DIR/VERSION"
 
 if [ "$(id -u)" = "0" ]; then

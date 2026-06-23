@@ -49,34 +49,51 @@ def c(text: str, color: str) -> str:
 # ── 美化输出 ──
 
 def print_banner() -> None:
-    name = "ASNIPtest"
+    """打印项目横幅 (ASCII 艺术)"""
     try:
         vp = Path(__file__).resolve().parent.parent / "VERSION"
         ver = vp.read_text().strip() if vp.is_file() else ""
     except OSError:
         ver = ""
-    tag = f" {ver}" if ver else ""
-    w = 50
-    print()
-    print(c("  " + "=" * w, C.C))
-    print(c(f"    {name}{tag}", C.B + C.C))
-    print(c(f"    ASN -> CIDR -> masscan -> CF Node -> CSV", C.D))
-    print(c("  " + "=" * w, C.C))
+    tag = f" v{ver}" if ver else ""
+    
+    # ASCII 艺术横幅
+    banner = r"""
+  _____ ____  _______       _______ _
+ |_   _|  _ \| ____\ \    / / ____| |_   _
+   | | | |_) |  _|  \ \  / /|  _| | | | |
+   | | |  _ <| |___  \ \/ / | |___| | |_|
+   |_| |_| \_\_____|  \__/  |_____|_|\__, |
+                                   |___/
+    """
+    
+    print(c(banner, C.C))
+    print(c(f"    IP 资产梳理工具{tag}", C.D))
+    print(c(f"    ASN -> CIDR -> 端口扫描 -> CF 节点 -> CSV", C.D))
+    print(c("  " + "=" * 50, C.C))
     print()
 
 
 def print_step(label: str) -> None:
-    print(c(f"\n  [{label}]", C.B + C.C))
+    """打印步骤标题 (带颜色和分隔符)"""
+    sep = c("─" * 50, C.D)
+    title = c(f" {label} ", C.B + C.C)
+    print(f"\n{sep}")
+    print(f"{title:^50}")
+    print(f"{sep}")
 
 
-def print_sep() -> None:
-    print(c("  " + "-" * 40, C.D))
+def print_sep(char: str = "─", color: str = C.D, width: int = 50) -> None:
+    """打印分隔符 (可自定义字符、颜色、宽度)"""
+    print(c(char * width, color))
 
 
 def write_progress(pct: float, extra: str = "") -> None:
-    filled = int(BAR_WIDTH * pct / 100)
-    bar = _FILL * filled + _EMPTY * (BAR_WIDTH - filled)
-    sys.stderr.write(f"\r  [{bar}] {pct:.1f}%{extra}")
+    """显示进度条 (带百分比和额外信息)"""
+    filled = int(pct / 100 * BAR_WIDTH)
+    bar = c(_FILL * filled, C.G) + c(_EMPTY * (BAR_WIDTH - filled), C.D)
+    pct_str = f"{pct:5.1f}%".rjust(6)
+    sys.stderr.write(f"\r  [{bar}] {pct_str}{extra}")
     sys.stderr.flush()
 
 
