@@ -21,23 +21,22 @@ __all__ = [
     "get_public_ip", "get_lan_ip", "detect_isp",
     "parse_ports", "port_is_free", "kill_port_process",
     "c", "C", "print_banner", "print_step", "print_sep",
+    "print_hardware_info", "print_result_header", "print_total_time",
 ]
 
-BAR_WIDTH = 30
-_FILL = "\u2588"
-_EMPTY = "\u2591"
+BAR_WIDTH = 24
+_FILL = "#"
+_EMPTY = "-"
 
-# ── ANSI 颜色 ──
+# ── ANSI 颜色（仅原生控制台色） ──
 
 class C:
-    R = "\033[0m"
-    B = "\033[1m"
-    D = "\033[2m"
-    G = "\033[32m"
-    Y = "\033[33m"
-    R2 = "\033[31m"
-    C = "\033[36m"
-    M = "\033[35m"
+    R  = "\033[0m"       # reset
+    G  = "\033[32m"      # green
+    LG = "\033[1;32m"    # light green
+    W  = "\033[1;37m"    # white
+    Y  = "\033[33m"      # yellow
+    LB = "\033[1;36m"    # light blue
 
 
 def c(text: str, color: str) -> str:
@@ -48,52 +47,103 @@ def c(text: str, color: str) -> str:
 
 # ── 美化输出 ──
 
-def print_banner() -> None:
-    """打印项目横幅"""
+def print_banner(cpu: int = 0, mem: str = "", rate: int = 0,
+                 cf_c: int = 0, api_c: int = 0,
+                 city: str = "", org: str = "") -> None:
+    """打印顶部标题 + 硬件信息区块"""
     try:
         vp = Path(__file__).resolve().parent.parent / "VERSION"
         ver = vp.read_text().strip() if vp.is_file() else ""
     except OSError:
         ver = ""
-    tag = f" {ver}" if ver else ""
-    w = 50
+    w = 60
+    sep = "=" * w
     print()
-    print(c("  " + "=" * w, C.C))
-    name = c(f"    IP-Tidy{tag}", C.B)
-    desc = c("    IP 资产梳理工具 -- ASN -> CIDR -> 扫描 -> CF 节点 -> CSV", C.D)
-    print(name)
-    print(desc)
-    print(c("  " + "=" * w, C.C))
+    print(c(sep, C.LB))
+    print(c("  xiaoqian ASN NSD TOOL", C.LG))
+    print(c("  ASN -> CIDR -> Masscan -> CF -> CSV", C.W))
+    print(c(sep, C.LB))
+
+    # 硬件 + 环境信息
+    if cpu:
+        hw = f"  [CPU] {cpu} 核  [MEM] {mem}  [Rate] {rate} pps"
+        print(c(hw, C.W))
+    if cf_c or api_c:
+        cfg_line = f"  [CF] {cf_c}c  [API] {api_c}c"
+        print(c(cfg_line, C.W))
+    if org:
+        loc = f"  [LOC] {city}" if city else ""
+        asn = f"  [ORG] {org}"
+        print(c(f"{loc}{asn}", C.W))
+    print(c(sep, C.LB))
     print()
 
 
 def print_step(label: str) -> None:
-    """打印步骤标题 (带颜色和分隔符)"""
-    sep = c("─" * 50, C.D)
-    plain = f" {label} "
-    title = c(plain.center(50), C.B + C.C)
+    """打印步骤标题"""
+    sep = c("=" * 60, C.LB)
+    title = c(f"  {label}", C.LG)
     print(f"\n{sep}")
     print(title)
     print(sep)
 
 
-def print_sep(char: str = "─", color: str = C.D, width: int = 50) -> None:
-    """打印分隔符 (可自定义字符、颜色、宽度)"""
+def print_sep(char: str = "-", color: str = C.W, width: int = 60) -> None:
+    """打印分隔符"""
     print(c(char * width, color))
 
 
+def print_hardware_info(cpu: int, mem_mb: int, rate: int,
+                        cf_concurrency: int, api_concurrency: int,
+                        city: str = "", org: str = "") -> None:
+    """打印硬件/环境信息行 (可独立调用)"""
+    mem_str = f"{mem_mb}MB" if mem_mb < 1024 else f"{mem_mb / 1024:.1f}GB"
+    hw = (f"  [硬件]  CPU {cpu} 核  |  可用内存 {mem_str}  |  "
+          f"Masscan {rate} pps")
+    print(c(hw, C.W))
+    cfg = (f"  [并发]  CF 检测 {cf_concurrency}c  |  "
+           f"API 查询 {api_concurrency}c")
+    print(c(cfg, C.W))
+    if org:
+        loc = city if city else ""
+        print(c(f"  [环境]  {loc}  |  {org}", C.W))
+    print_sep("=", C.LB)
+
+
 def write_progress(pct: float, extra: str = "") -> None:
-    """显示进度条 (带百分比和额外信息)"""
+    """显示 # 进度条"""
     filled = int(pct / 100 * BAR_WIDTH)
-    bar = c(_FILL * filled, C.G) + c(_EMPTY * (BAR_WIDTH - filled), C.D)
-    pct_str = f"{pct:5.1f}%".rjust(6)
-    sys.stderr.write(f"\r  [{bar}] {pct_str}{extra}")
+    bar = c(_FILL * filled, C.G) + c(_EMPTY * (BAR_WIDTH - filled), C.W)
+    pct_s = f"{pct:5.1f}%".rjust(6)
+    sys.stderr.write(f"\r  [{bar}] {pct_s}{extra}")
     sys.stderr.flush()
 
 
 def write_progress_done(extra: str = "") -> None:
-    sys.stderr.write(f"\r  [{c(_FILL * BAR_WIDTH, C.G)}]  100.0%{extra}\n")
+    """完成进度条"""
+    bar = c(_FILL * BAR_WIDTH, C.G)
+    sys.stderr.write(f"\r  [{bar}]  100.0%{extra}\n")
     sys.stderr.flush()
+
+
+def print_result_header(total_asn: int, total_cidr: int,
+                        total_open: int, cf_nodes: int, passed: int) -> None:
+    """打印结果摘要头部"""
+    sep = c("=" * 60, C.G)
+    print()
+    print(sep)
+    print(c("  [TASK COMPLETE]", C.LG))
+    print(c(f"  ASN: {total_asn}  |  CIDR: {total_cidr}  |  "
+            f"Open Ports: {total_open}  |  CF Nodes: {cf_nodes}  |  "
+            f"Passed: {passed}", C.W))
+    print(sep)
+    print()
+
+
+def print_total_time(elapsed: float) -> None:
+    """打印总耗时"""
+    m, s = divmod(int(elapsed), 60)
+    print(c(f"  总耗时: {m}m {s}s", C.W))
 
 
 # ── 公网 IP 获取（并发 HTTP + DNS 兜底） ──
@@ -176,10 +226,25 @@ def _load_ipinfo_token() -> Optional[str]:
     return None
 
 
-def detect_isp(ip: str) -> tuple[str, str, str]:
+def detect_isp(ip: str) -> tuple[str, str, str, str]:
+    """返回 (ip, country, org, city)，不打印"""
     if ip == "127.0.0.1":
-        print("  (无法获取公网 IP，跳过运营商检测)")
-        return ip, "", ""
+        return ip, "", "", ""
+    try:
+        token = _load_ipinfo_token()
+        url = f"https://ipinfo.io/{ip}/json"
+        if token:
+            url += f"?token={token}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        country = data.get("country", "")
+        org = data.get("org", "")
+        city = data.get("city", "")
+        return ip, country, org, city
+    except Exception:
+        pass
+    return ip, "", "", ""
     try:
         token = _load_ipinfo_token()
         url = f"https://ipinfo.io/{ip}/json"
@@ -196,10 +261,10 @@ def detect_isp(ip: str) -> tuple[str, str, str]:
             print(f"  地区: {city}, {country}  运营商: {isp}")
         else:
             print(f"  地区: {city}, {country}  机构: {org}")
-        return ip, country, org
+        return ip, country, org, city
     except Exception as e:
         print(f"  (获取详情失败: {e})")
-    return ip, "", ""
+    return ip, "", "", ""
 
 
 # ── 端口解析 ──

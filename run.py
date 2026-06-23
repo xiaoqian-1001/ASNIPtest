@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ASNIPtest -- ASN -> CIDR -> masscan -> CF 反代节点检测 -> CSV 输出
+IP-Tidy -- ASN -> CIDR -> masscan -> CF 反代节点检测 -> CSV 输出
 用法: python3 run.py AS209242 [AS3214 ...] [-p PORTS]
 """
 
@@ -33,6 +33,7 @@ from lib.utils import (
     port_is_free,
     kill_port_process,
     c, C, print_banner, print_step, print_sep,
+    print_hardware_info, print_result_header, print_total_time,
 )
 
 BASE = Path(__file__).parent.resolve()
@@ -185,6 +186,7 @@ class ScannerConfig:
     global_ip: str = ""
     global_country: str = ""
     global_isp: str = ""
+    global_city: str = ""
 
 
 def detect_hardware() -> tuple[int, int]:
@@ -318,16 +320,13 @@ def init_runtime() -> ScannerConfig:
         lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
     cfg.scan_ports = ",".join(lines)
 
-    print(c(f"  CPU: {cfg.cpu}核  MEM: {cfg.ram_mb}MB  "
-             f"masscan: {cfg.masscan_rate}pps  cf: {cfg.cf_concurrency}c  api: {cfg.api_concurrency}c", C.D))
-
-    cfg.global_ip, cfg.global_country, cfg.global_isp = detect_isp(get_public_ip())
+    cfg.global_ip, cfg.global_country, cfg.global_isp, cfg.global_city = detect_isp(get_public_ip())
     return cfg
 
 
 def ensure_cf_scanner() -> None:
     if not CF_SCANNER.is_file():
-        print(c("  [FAIL] cf-scanner 未找到，请先编译: cd cf-scanner-src && go build -o ../cf-scanner main.go", C.R2))
+        print(c("  [FAIL] cf-scanner 未找到，请先编译: cd cf-scanner-src && go build -o ../cf-scanner main.go", C.Y))
         sys.exit(1)
     if not os.access(CF_SCANNER, os.X_OK):
         CF_SCANNER.chmod(0o755)
@@ -401,7 +400,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
     (BASE / "cidrs.txt").write_text("\n".join(cidrs))
     print(f"  共 {len(cidrs)} 个 CIDR")
     if not cidrs:
-        print(c("  [FAIL] 无可用 CIDR，请检查 ASN 是否正确", C.R2))
+        print(c("  [FAIL] 无可用 CIDR，请检查 ASN 是否正确", C.Y))
         sys.exit(1)
     return cidrs
 
@@ -465,9 +464,10 @@ def _read_masscan_stderr(proc, prefix: str = "") -> list[str]:
 
 
 def step_masscan(cfg: ScannerConfig) -> int:
+    step_start = time.time()
     ip_file = BASE / "cidrs.txt"
     if not ip_file.exists() or ip_file.stat().st_size == 0:
-        print(c("  [FAIL] cidrs.txt 为空，跳过 masscan", C.R2))
+        print(c("  [FAIL] cidrs.txt 为空，跳过 masscan", C.Y))
         return 0
 
     xml_file = BASE / "masscan_result.xml"
@@ -509,18 +509,18 @@ def step_masscan(cfg: ScannerConfig) -> int:
             sys.stderr.flush()
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "init: failed" in err:
-                print(c("  [FAIL] masscan 需要 raw socket 权限", C.R2))
+                print(c("  [FAIL] masscan 需要 raw socket 权限", C.Y))
                 if os.geteuid() != 0:
                     print("  解决: sudo python3 run.py ...  (以 root 运行)")
                     print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
             elif "password is required" in err or "a password is required" in err:
-                print(c("  [FAIL] sudo 需要密码交互，当前环境无法输入", C.R2))
+                print(c("  [FAIL] sudo 需要密码交互，当前环境无法输入", C.Y))
                 print("  解决: sudo python3 run.py ...  (以 root 运行)")
                 print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
             else:
                 sys.stderr.write("".join(stderr_lines))
                 sys.stderr.flush()
-                print(c(f"\n  [FAIL] masscan 返回码 {proc.returncode}", C.R2))
+                print(c(f"\n  [FAIL] masscan 返回码 {proc.returncode}", C.Y))
             raise subprocess.CalledProcessError(
                 proc.returncode, cmd, output=None,
                 stderr="".join(stderr_lines))
@@ -567,11 +567,13 @@ def step_masscan(cfg: ScannerConfig) -> int:
     text_file = BASE / "masscan_result.txt"
     text_file.write_text("\n".join(all_open) + "\n")
     print(f"  开放端口: {len(all_open)} (syn-ack 确认)")
+    print(c(f"  本步耗时: {int(time.time() - step_start)}s", C.W))
     return len(all_open)
 
 
 def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
     """流式流水线: cf-scanner + API 精筛合并执行"""
+    step_start = time.time()
     input_file = BASE / "masscan_result.txt"
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
@@ -669,9 +671,11 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
         passed = sum(1 for _ in f) - 1
     passed = max(0, passed)
 
-    print(f"  CF 节点: {hits}")
-    rate = f"{passed / hits * 100:.0f}%" if hits else "0%"
-    print(c(f"  精筛通过: {rate} ({passed}/{hits})", C.G if passed else C.D))
+    rate_pct = passed / hits * 100 if hits else 0
+    rate_color = C.G if rate_pct >= 50 else C.Y
+    msg = f"  CF 节点: {hits}  |  精筛通过: {rate_pct:.0f}% ({passed}/{hits})"
+    print(c(msg, rate_color))
+    print(c(f"  本步耗时: {int(time.time() - step_start)}s", C.W))
     return hits, passed
 
 
@@ -747,7 +751,7 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
             sys.stderr.write("\n"); sys.stderr.flush()
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "password is required" in err:
-                print(c("  [FAIL] masscan 权限不足", C.R2))
+                print(c("  [FAIL] masscan 权限不足", C.Y))
             raise subprocess.CalledProcessError(proc.returncode, cmd,
                                                 output=None, stderr="".join(stderr_lines))
 
@@ -794,14 +798,14 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
 
     result_file = BASE / "masscan_result.txt"
     result_file.write_text("\n".join(all_open) + "\n")
-    print(c(f"  深度 masscan 完成: {len(all_open)} 开放端口", C.C))
+    print(c(f"  深度 masscan 完成: {len(all_open)} 开放端口", C.LB))
 
     if not all_open:
         print("  无新增开放端口")
         return len(saved)
 
     # ── 对深度结果跑 cf-scanner + 精筛 ──
-    print(c("  CF 检测中...", C.D))
+    print(c("  CF 检测中...", C.W))
     hits, _passed = _pipeline(cfg)
 
     # 合并结果
@@ -970,7 +974,7 @@ def _serve_download(file_path: Path) -> None:
     server: Optional[subprocess.Popen] = None
     try:
         print_sep()
-        print(c("  Download (按回车关闭):", C.B))
+        print(c("  Download (按回车关闭):", C.W))
         print(f"  http://{lan_ip}:{port}/{file_path.name}")
         pub = get_public_ip()
         if pub not in ("127.0.0.1", lan_ip):
@@ -1003,12 +1007,12 @@ def _parse_asns(raw_args: list[str]) -> list[str]:
     raw = ""
     if not raw_args:
         try:
-            raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
+            raw = input(c("  输入 ASN 编号 (多个用逗号分隔): ", C.Y)).strip()
         except (EOFError, KeyboardInterrupt):
             try:
                 with open("/dev/tty") as tty:
                     os.dup2(tty.fileno(), 0)
-                raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
+                raw = input(c("  输入 ASN 编号 (多个用逗号分隔): ", C.Y)).strip()
             except Exception:
                 print(f"\n  请在终端运行: cd {BASE} && python3 run.py\n")
                 sys.exit(0)
@@ -1042,6 +1046,7 @@ def _parse_custom_port(args: list[str]) -> Optional[str]:
 
 
 def main() -> None:
+    main_start = time.time()
     parser = argparse.ArgumentParser(
         prog="xiaoqian",
         description=f"ASNIPtest {VERSION} -- ASN -> masscan -> CF 节点检测",
@@ -1067,7 +1072,7 @@ def main() -> None:
     parser.add_argument("-d", "--deep", action="store_true",
                         help="深度扫描: 对 CF 命中的 IP 追加 55546 个端口扫描 (发现隐藏节点)")
     parser.add_argument("-v", "--version", action="version",
-                        version=f"ASNIPtest {VERSION}")
+                        version=f"IP-Tidy {VERSION}")
     a = parser.parse_args()
 
     print_banner()
@@ -1075,10 +1080,13 @@ def main() -> None:
     asns = _parse_asns(sys.argv[1:] if not a.asns else a.asns)
 
     if not asns:
-        print("用法: xiaoqian AS209242 [AS3214 ...] [-p PORTS] [-s]")
+        print("用法: ip-tidy AS209242 [AS3214 ...] [-p PORTS]")
         sys.exit(1)
 
-    print(c(f"  Target: {', '.join(f'AS{x}' for x in asns)}", C.B))
+    print_hardware_info(cfg.cpu, cfg.ram_mb, cfg.masscan_rate,
+                        cfg.cf_concurrency, cfg.api_concurrency,
+                        cfg.global_city, cfg.global_isp)
+    print(c(f"  [已确认] 目标 ASN: {', '.join(f'AS{x}' for x in asns)}", C.G))
 
     if a.rate:
         cfg.masscan_rate = max(100, a.rate)
@@ -1087,7 +1095,7 @@ def main() -> None:
     if a.ports:
         cfg.scan_ports = parse_ports(a.ports)
         if not cfg.scan_ports:
-            print(c(f"  [FAIL] 无效端口: {a.ports}", C.R2))
+            print(c(f"  [FAIL] 无效端口: {a.ports}", C.Y))
             sys.exit(1)
         print(f"  自定义端口: {cfg.scan_ports}")
     elif a.wide:
@@ -1102,7 +1110,7 @@ def main() -> None:
         print(f"  默认端口: {cfg.scan_ports}")
         print(f"  宽端口: {WIDE_PORTS}")
         try:
-            inp = input("  回车默认 / w=宽端口 / r=随机5端口 / 自定义: ").strip()
+            inp = input(c("  端口模式 (回车=默认 / w=宽端口 / r=随机5 / 自定义): ", C.Y)).strip().lower()
         except (EOFError, KeyboardInterrupt):
             inp = ""
         if inp.lower() == "w":
@@ -1122,44 +1130,47 @@ def main() -> None:
         if cp:
             cfg.scan_ports = cp
 
+    port_desc = f"端口 ({_port_count(cfg.scan_ports)} 个)"
+    print(c(f"  [已确认] 端口模式: {port_desc}", C.G))
+
     total_steps = 2 if a.skip_masscan else 3
     do_speed = a.speed
     do_deep = a.deep
     if not do_speed:
         try:
-            ch = input("\n  是否测速？(y/n，默认跳过): ").strip().lower()
+            ts = input(c("  是否测速？(y/n, 回车跳过): ", C.Y)).strip().lower()
         except (EOFError, KeyboardInterrupt):
-            ch = ""
-        do_speed = ch == "y"
+            ts = ""
+        do_speed = ts == "y"
+        if not do_speed:
+            print(c("  [已跳过] 测速功能 (回车自动选择)", C.G))
     if not do_deep and not sys.argv[1:]:
         try:
-            print_sep("=", C.C)
-            ch = input(c("  ✨ 深度扫描: 对 CF 命中的 IP 追加 55546 个端口扫描 (y/n,默认跳过): ", C.B + C.C)).strip().lower()
-            print_sep("=", C.C)
+            ch = input(c("  深度扫描？(y/n, 回车跳过): ", C.Y)).strip().lower()
             do_deep = ch == "y"
+            if not do_deep:
+                print(c("  [已跳过] 深度扫描 (回车自动选择)", C.G))
         except (EOFError, KeyboardInterrupt):
             do_deep = False
     if do_speed:
         total_steps += 1
     if do_deep:
         total_steps += 1
-    if not do_speed:
-        print("  跳过测速\n")
 
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("Step 1  ASN -> CIDR 前缀", lambda: step_fetch_prefixes(cfg, asns)),
+        ("Step 1  ASN -> CIDR", lambda: step_fetch_prefixes(cfg, asns)),
     ]
     step_num = 1
     if a.skip_masscan:
-        print(c("  (跳过 masscan, 使用已有结果)", C.D))
+        print(c("  (跳过 masscan, 使用已有结果)", C.W))
     else:
         step_num += 1
-        steps.append((f"Step {step_num}  masscan 端口扫描", lambda: step_masscan(cfg)))
+        steps.append((f"Step {step_num}  Masscan 端口扫描", lambda: step_masscan(cfg)))
     step_num += 1
     steps.append((f"Step {step_num}  CF 检测 + API 精筛", lambda: _pipeline(cfg)))
     if do_deep:
         step_num += 1
-        steps.append((f"Step {step_num}  深度宽端口追加", lambda: step_deep_scan(cfg)))
+        steps.append((f"Step {step_num}  深度宽端口扫描", lambda: step_deep_scan(cfg)))
     if do_speed:
         step_num += 1
         steps.append((f"Step {step_num}  延迟 + 带宽测速", lambda: step_speed_test(cfg)))
@@ -1197,18 +1208,66 @@ def main() -> None:
         except OSError:
             pass
 
+    cidr_count = 0
+    total_open = 0
+    cf_nodes = 0
+    passed_count = 0
+
     for label, fn in steps:
         print_step(label)
         try:
-            fn()
+            result = fn()
+            if label.startswith("Step 1"):
+                cidr_count = len(result)
+            elif label.startswith("Step 2") or ("Masscan" in label and "端口" in label):
+                total_open = result
+            elif label.startswith("Step 3") or ("CF 检测" in label):
+                cf_nodes, passed_count = result
         except Exception as e:
-            print(c(f"  [FAIL] {e}", C.R2))
+            print(c(f"  [FAIL] {e}", C.Y))
             sys.exit(1)
 
-    output_csv(asns)
-    print_sep()
-    print(c("  [OK] 完成", C.G))
-    print()
+    verified_file = BASE / "verified.txt"
+    csv_path = None
+    if verified_file.exists() and verified_file.stat().st_size > 0:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tag = "_".join(asns)
+        csv_path = BASE / f"output_{tag}_{ts}.csv"
+
+        parsed: list[str] = []
+        with open(verified_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("IP"):
+                    continue
+                if line.count(",") >= 8:
+                    parsed.append(line)
+
+        with open(csv_path, "w") as f:
+            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
+            for p in parsed:
+                f.write(p + "\n")
+
+    print_result_header(
+        len(asns),
+        cidr_count,
+        total_open,
+        cf_nodes,
+        passed_count
+    )
+
+    if csv_path and csv_path.exists():
+        print(c(f"  [CSV]  {csv_path}", C.LB))
+
+    lan_ip = get_lan_ip()
+    port = 8899
+    pub = get_public_ip()
+    if pub and pub != "127.0.0.1":
+        print(c(f"  [LINK] http://{pub}:{port}/", C.LB))
+
+    print_sep("-", C.W)
+    print_total_time(time.time() - main_start)
+    print(c("  按回车退出...", C.W))
 
 
 if __name__ == "__main__":
