@@ -56,6 +56,40 @@ _RANDOM_ZONES: list[tuple[int, int, int]] = [
     (60001, 65535, 3),
 ]
 
+
+def _split_v4_v6(cidrs: list[str]) -> tuple[list[str], list[str]]:
+    """拆分 IPv4/IPv6 CIDR 列表，自动去重和合并"""
+    v4, v6 = [], []
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4:
+            v4.append(net)
+        else:
+            v6.append(net)
+
+    def _merge(nets):
+        if not nets:
+            return []
+        collapsed = list(ipaddress.collapse_addresses(nets))
+        collapsed.sort(key=lambda n: (n.prefixlen, int(n.network_address)))
+        return [str(n) for n in collapsed]
+
+    return _merge(v4), _merge(v6)
+
+
+def _cidr_count(cidrs: list[str]) -> int:
+    """计算 CIDR 列表中包含的 IP 总数"""
+    total = 0
+    for c in cidrs:
+        try:
+            total += ipaddress.ip_network(c, strict=False).num_addresses
+        except ValueError:
+            pass
+    return total
+
 _SPEED_TESTS = [
     ("speed.cloudflare.com", "https://speed.cloudflare.com/__down?bytes=1048576",   1,   "1MB"),
     ("speed.cloudflare.com", "https://speed.cloudflare.com/__down?bytes=10485760",  10,  "10MB"),
@@ -190,6 +224,7 @@ class ScannerConfig:
     global_country: str = ""
     global_isp: str = ""
     global_city: str = ""
+    ip_mode: str = "all"  # "v4" | "v6" | "all"
 
 
 def detect_hardware() -> tuple[int, int]:
@@ -374,10 +409,13 @@ def _asn_cache_save(data: dict[str, Any]) -> None:
 
 # ── Pipeline Steps ──
 
-def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str], cidrs: list[str]) -> list[str]:
-    all_cidrs = list(cidrs)
-    if cidrs:
-        print(f"  直接 CIDR: {len(cidrs)} 个 ({', '.join(cidrs[:5])}{'...' if len(cidrs) > 5 else ''})")
+def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str], v4_cidrs: list[str], v6_cidrs: list[str]) -> tuple[list[str], list[str]]:
+    all_v4 = list(v4_cidrs)
+    all_v6 = list(v6_cidrs)
+    if v4_cidrs:
+        print(f"  直接 IPv4 CIDR: {len(v4_cidrs)} 个 ({', '.join(v4_cidrs[:5])}{'...' if len(v4_cidrs) > 5 else ''})")
+    if v6_cidrs:
+        print(f"  直接 IPv6 CIDR: {len(v6_cidrs)} 个 ({', '.join(v6_cidrs[:5])}{'...' if len(v6_cidrs) > 5 else ''})")
 
     cache = _asn_cache_load()
     now_ts = time.time()
@@ -387,41 +425,77 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str], cidrs: list[str]) -
         cache_key = f"AS{asn}"
         if cache_key in cache and now_ts - cache[cache_key].get("ts", 0) < _ASN_CACHE_TTL:
             entry = cache[cache_key]
-            all_cidrs.extend(entry["cidrs"])
+            all_v4.extend(entry.get("v4", []))
+            all_v6.extend(entry.get("v6", []))
+            v4_cnt = entry.get("v4_count", 0)
+            v6_cnt = entry.get("v6_count", 0)
             age_h = (now_ts - entry["ts"]) / 3600
-            print(f"  AS{asn} -> {entry['count']} 个 IPv4 CIDR (缓存, {age_h:.1f}h前)")
+            parts = []
+            if v4_cnt: parts.append(f"{v4_cnt} v4")
+            if v6_cnt: parts.append(f"{v6_cnt} v6")
+            print(f"  AS{asn} -> {', '.join(parts)} CIDR (缓存, {age_h:.1f}h前)")
             continue
 
         url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+        v4_new = 0
+        v6_new = 0
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
-            count = 0
-            prefixes: list[str] = []
+            prefixes_v4, prefixes_v6 = [], []
             for p in data["data"]["prefixes"]:
-                if ":" not in p["prefix"]:
-                    prefixes.append(p["prefix"])
-                    all_cidrs.append(p["prefix"])
-                    count += 1
-            cache[cache_key] = {"ts": now_ts, "count": count,
-                                "cidrs": prefixes, "updated": now_str}
-            print(f"  AS{asn} -> {count} 个 IPv4 CIDR")
+                prefix = p["prefix"]
+                if ":" in prefix:
+                    prefixes_v6.append(prefix)
+                    all_v6.append(prefix)
+                    v6_new += 1
+                else:
+                    prefixes_v4.append(prefix)
+                    all_v4.append(prefix)
+                    v4_new += 1
+            cache[cache_key] = {"ts": now_ts, "v4_count": v4_new, "v6_count": v6_new,
+                                "v4": prefixes_v4, "v6": prefixes_v6, "updated": now_str}
+            parts = []
+            if v4_new: parts.append(f"{v4_new} v4")
+            if v6_new: parts.append(f"{v6_new} v6")
+            print(f"  AS{asn} -> {', '.join(parts)} CIDR")
         except (urllib.error.URLError, json.JSONDecodeError, OSError,
                 KeyError) as e:
             if cache_key in cache:
-                all_cidrs.extend(cache[cache_key]["cidrs"])
-                print(f"  AS{asn} -> {e}, 使用上次缓存 ({cache[cache_key]['count']} CIDR)")
+                entry = cache[cache_key]
+                all_v4.extend(entry.get("v4", []))
+                all_v6.extend(entry.get("v6", []))
+                summary = []
+                if entry.get("v4_count"): summary.append(f"v4={entry['v4_count']}")
+                if entry.get("v6_count"): summary.append(f"v6={entry['v6_count']}")
+                print(f"  AS{asn} -> {e}, 使用上次缓存 ({', '.join(summary)})")
             else:
                 print(f"  AS{asn} -> 失败: {e}")
 
     _asn_cache_save(cache)
+
+    # 合并去重
+    final_v4, final_v6 = _split_v4_v6(all_v4 + all_v6)
+    all_cidrs = final_v4 + final_v6
+
     (BASE / "cidrs.txt").write_text("\n".join(all_cidrs))
-    print(f"  共 {len(all_cidrs)} 个 CIDR")
+    (BASE / "cidrs_v4.txt").write_text("\n".join(final_v4))
+    (BASE / "cidrs_v6.txt").write_text("\n".join(final_v6))
+
+    v4_ip_count = _cidr_count(final_v4)
+    v6_ip_count = _cidr_count(final_v6)
+    msg = f"  共 {len(all_cidrs)} 个 CIDR"
+    if final_v4:
+        msg += f" (v4: {len(final_v4)} 段 ~{v4_ip_count:,} IP)"
+    if final_v6:
+        msg += f" (v6: {len(final_v6)} 段)"
+    print(msg)
+
     if not all_cidrs:
         print(c("  [FAIL] 无可用 CIDR，请检查输入是否正确", C.Y))
         sys.exit(1)
-    return all_cidrs
+    return final_v4, final_v6
 
 
 def _read_masscan_stderr(proc, prefix: str = "") -> list[str]:
@@ -484,10 +558,34 @@ def _read_masscan_stderr(proc, prefix: str = "") -> list[str]:
 
 def step_masscan(cfg: ScannerConfig) -> int:
     step_start = time.time()
-    ip_file = BASE / "cidrs.txt"
-    if not ip_file.exists() or ip_file.stat().st_size == 0:
-        print(c("  [FAIL] cidrs.txt 为空，跳过 masscan", C.Y))
+
+    # IPv6 模式下跳过 masscan
+    if cfg.ip_mode == "v6":
+        print(c("  [INFO] v6-only 模式，masscan 仅支持 IPv4，跳过", C.W))
         return 0
+
+    ip_file = BASE / "cidrs_v4.txt"
+    if not ip_file.exists() or ip_file.stat().st_size == 0:
+        # 兼容：回退到 cidrs.txt
+        ip_file = BASE / "cidrs.txt"
+        if not ip_file.exists() or ip_file.stat().st_size == 0:
+            print(c("  [FAIL] 无 IPv4 CIDR，跳过 masscan", C.Y))
+            return 0
+
+    # 过滤 IPv6 行 (cidrs.txt 可能包含混合内容)
+    if ip_file.name == "cidrs.txt":
+        v4_only = []
+        with open(ip_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and ":" not in line:
+                    v4_only.append(line)
+        if not v4_only:
+            print(c("  [FAIL] cidrs.txt 无 IPv4，跳过 masscan", C.Y))
+            return 0
+        tmp_v4 = BASE / "cidrs_v4.txt"
+        tmp_v4.write_text("\n".join(v4_only) + "\n")
+        ip_file = tmp_v4
 
     xml_file = BASE / "masscan_result.xml"
     if xml_file.exists():
@@ -721,7 +819,7 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
 
     # 保存已有结果 (去重 key = IP:port)
     saved: dict[str, str] = {}
-    saved_header = "IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN"
+    saved_header = "IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议"
     if verified_file.exists() and verified_file.stat().st_size > 0:
         with open(verified_file) as f:
             for line in f:
@@ -966,64 +1064,18 @@ def output_csv(asns: list[str]) -> None:
                 parsed.append(line)
 
     with open(csv_path, "w") as f:
-        f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
+        f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
         for p in parsed:
-            f.write(p + "\n")
+            ip_part = p.split(",")[0]
+            proto = "IPv6" if ":" in ip_part else "IPv4"
+            f.write(p + f",{proto}\n")
 
     print(c(f"\n  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
     _serve_download(csv_path)
 
 
-def _serve_download(file_path: Path) -> None:
-    lan_ip = get_lan_ip()
-    port = 8899
-
-    if not port_is_free(port):
-        print(f"  端口 {port} 被占用，尝试释放...")
-        if kill_port_process(port) and port_is_free(port):
-            print(f"  已释放端口 {port}")
-        else:
-            while not port_is_free(port) and port < 9900:
-                port += 1
-            if port >= 9900:
-                print("\n  [!] 无可用端口，跳过下载服务")
-                print(f"  [file] 结果文件: {file_path}")
-                return
-
-    server: Optional[subprocess.Popen] = None
-    try:
-        print_sep()
-        print(c("  Download (按回车关闭):", C.W))
-        print(f"  http://{lan_ip}:{port}/{file_path.name}")
-        pub = get_public_ip()
-        if pub not in ("127.0.0.1", lan_ip):
-            print(f"  http://{pub}:{port}/{file_path.name}")
-        print()
-        server = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(port),
-             "--directory", str(BASE)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if sys.stdin.isatty():
-            input()
-        else:
-            print("  (非交互终端，按 Ctrl+C 停止服务)")
-            try:
-                server.wait()
-            except KeyboardInterrupt:
-                pass
-    except (EOFError, KeyboardInterrupt):
-        pass
-    finally:
-        if server and server.poll() is None:
-            server.terminate()
-            try:
-                server.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                server.kill()
-
-
-def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str]]:
-    """解析输入，返回 (ASN列表, CIDR列表)"""
+def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """解析输入，返回 (ASN列表, IPv4CIDR列表, IPv6CIDR列表)"""
     raw = ""
     if not raw_args:
         try:
@@ -1043,7 +1095,7 @@ def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str]]:
             arg = raw_args[i]
             if arg in ("-p", "-r"):
                 i += 2
-            elif arg in ("-s", "-w", "-R", "-d"):
+            elif arg in ("-s", "-w", "-R", "-d", "--v4-only", "--v6-only"):
                 i += 1
             else:
                 filtered.append(arg)
@@ -1051,16 +1103,19 @@ def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str]]:
         raw = ",".join(filtered)
 
     asns: list[str] = []
-    cidrs: list[str] = []
+    v4_cidrs: list[str] = []
+    v6_cidrs: list[str] = []
     for item in raw.replace("，", ",").split(","):
         item = item.strip()
         if not item:
             continue
-        # 判断是 CIDR 还是 ASN
         if "/" in item:
             try:
                 net = ipaddress.ip_network(item, strict=False)
-                cidrs.append(str(net))
+                if net.version == 6:
+                    v6_cidrs.append(str(net))
+                else:
+                    v4_cidrs.append(str(net))
             except ValueError:
                 print(c(f"  [WARN] 无效 CIDR: {item}，已忽略", C.Y))
         else:
@@ -1069,7 +1124,7 @@ def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str]]:
                 asns.append(asn)
             else:
                 print(c(f"  [WARN] 无法识别: {item}，已忽略", C.Y))
-    return asns, cidrs
+    return asns, v4_cidrs, v6_cidrs
 
 
 def _parse_custom_port(args: list[str]) -> Optional[str]:
@@ -1087,14 +1142,14 @@ def main() -> None:
     main_start = time.time()
     parser = argparse.ArgumentParser(
         prog="xiaoqian",
-        description=f"ASNIPtest {VERSION} -- ASN -> masscan -> CF 节点检测",
+        description=f"IP-Tidy {VERSION} -- CIDR/ASN -> masscan -> CF 节点检测",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n"
-               "  xiaoqian AS209242\n"
-                "  ip-tidy AS209242 -w -s\n"
-                "  ip-tidy AS209242 -p 443,8443\n"
-                "  ip-tidy AS209242 -w -r 4000\n"
-                "  ip-tidy 1.2.3.0/24,5.6.7.0/24")
+               "  ip-tidy AS209242\n"
+               "  ip-tidy AS209242 -w -s\n"
+               "  ip-tidy 1.2.3.0/24,5.6.7.0/24\n"
+               "  ip-tidy AS209242 -w -r 4000\n"
+               "  ip-tidy 2001:db8::/32,AS209242 --v4-only")
     parser.add_argument("targets", nargs="*", help="ASN 编号 或 CIDR (可多个，空格或逗号分隔)")
     parser.add_argument("-p", "--ports", metavar="PORTS",
                         help="自定义扫描端口 (如 443 或 80,443 或 8000-9000)")
@@ -1114,6 +1169,10 @@ def main() -> None:
                         version=f"IP-Tidy {VERSION}")
     parser.add_argument("-g", "--geo-update", action="store_true",
                         help="下载/更新 MaxMind GeoLite2 离线数据库")
+    parser.add_argument("--v4-only", action="store_true",
+                        help="仅处理 IPv4 (过滤 IPv6 CIDR, masscan 正常扫描)")
+    parser.add_argument("--v6-only", action="store_true",
+                        help="仅处理 IPv6 (跳过 masscan, 导出 IPv6 CIDR 列表)")
     a = parser.parse_args()
 
     if a.geo_update:
@@ -1125,13 +1184,31 @@ def main() -> None:
             print(f"  [OK] 数据库已保存到 {Path.home() / '.config' / 'ip-tidy'}")
         sys.exit(0)
 
+    if a.v4_only and a.v6_only:
+        print(c("  [FAIL] --v4-only 和 --v6-only 不能同时使用", C.Y))
+        sys.exit(1)
+
     print_banner()
     cfg = init_runtime()
-    asns, cidrs = _parse_targets(sys.argv[1:] if not a.targets else a.targets)
 
-    if not asns and not cidrs:
+    if a.v4_only:
+        cfg.ip_mode = "v4"
+    elif a.v6_only:
+        cfg.ip_mode = "v6"
+
+    asns, v4_cidrs, v6_cidrs = _parse_targets(sys.argv[1:] if not a.targets else a.targets)
+
+    if not asns and not v4_cidrs and not v6_cidrs:
         print("用法: ip-tidy AS209242 [...] 或 ip-tidy 1.2.3.0/24 [...]")
         sys.exit(1)
+
+    # 过滤不符合 IP 模式的 CIDR
+    if cfg.ip_mode == "v4" and v6_cidrs:
+        print(c(f"  [已跳过] {len(v6_cidrs)} 个 IPv6 CIDR (--v4-only)", C.G))
+        v6_cidrs = []
+    elif cfg.ip_mode == "v6" and v4_cidrs:
+        print(c(f"  [已跳过] {len(v4_cidrs)} 个 IPv4 CIDR (--v6-only)", C.G))
+        v4_cidrs = []
 
     print_hardware_info(cfg.cpu, cfg.ram_mb, cfg.masscan_rate,
                         cfg.cf_concurrency, cfg.api_concurrency,
@@ -1141,9 +1218,16 @@ def main() -> None:
     targets_desc = []
     if asns:
         targets_desc.append(", ".join(f"AS{x}" for x in asns))
-    if cidrs:
-        targets_desc.append(", ".join(cidrs[:5]) + ("..." if len(cidrs) > 5 else ""))
-    print(c(f"  [已确认] 目标: {'; '.join(targets_desc)}", C.G))
+    if v4_cidrs:
+        targets_desc.append(f"IPv4 x{len(v4_cidrs)} ({', '.join(v4_cidrs[:3])}{'...' if len(v4_cidrs) > 3 else ''})")
+    if v6_cidrs:
+        targets_desc.append(f"IPv6 x{len(v6_cidrs)} ({', '.join(v6_cidrs[:3])}{'...' if len(v6_cidrs) > 3 else ''})")
+    mode_tag = ""
+    if cfg.ip_mode == "v4":
+        mode_tag = " [v4-only]"
+    elif cfg.ip_mode == "v6":
+        mode_tag = " [v6-only]"
+    print(c(f"  [已确认] 目标{mode_tag}: {'; '.join(targets_desc)}", C.G))
 
     if a.rate:
         cfg.masscan_rate = max(100, a.rate)
@@ -1215,11 +1299,14 @@ def main() -> None:
         total_steps += 1
 
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("Step 1  ASN -> CIDR", lambda: step_fetch_prefixes(cfg, asns, cidrs)),
+        ("Step 1  ASN -> CIDR", lambda: step_fetch_prefixes(cfg, asns, v4_cidrs, v6_cidrs)),
     ]
     step_num = 1
-    if a.skip_masscan:
-        print(c("  (跳过 masscan, 使用已有结果)", C.W))
+    if a.skip_masscan or cfg.ip_mode == "v6":
+        if cfg.ip_mode == "v6":
+            print(c("  (v6-only: 跳过 masscan, masscan 仅支持 IPv4)", C.W))
+        elif a.skip_masscan:
+            print(c("  (跳过 masscan, 使用已有结果)", C.W))
     else:
         step_num += 1
         steps.append((f"Step {step_num}  Masscan 端口扫描", lambda: step_masscan(cfg)))
@@ -1233,7 +1320,8 @@ def main() -> None:
         steps.append((f"Step {step_num}  延迟 + 带宽测速", lambda: step_speed_test(cfg)))
 
     # 清理上次运行的中间文件，防止残留数据污染
-    for stale in ("cidrs.txt", "masscan_result.xml", "cf_hits.txt", "verified.txt"):
+    for stale in ("cidrs.txt", "cidrs_v4.txt", "cidrs_v6.txt",
+                  "masscan_result.xml", "cf_hits.txt", "verified.txt"):
         p = BASE / stale
         try:
             if p.exists():
@@ -1266,6 +1354,8 @@ def main() -> None:
             pass
 
     cidr_count = 0
+    v4_cidr_count = 0
+    v6_cidr_count = 0
     total_open = 0
     cf_nodes = 0
     passed_count = 0
@@ -1275,7 +1365,10 @@ def main() -> None:
         try:
             result = fn()
             if label.startswith("Step 1"):
-                cidr_count = len(result)
+                v4_list, v6_list = result
+                cidr_count = len(v4_list) + len(v6_list)
+                v4_cidr_count = len(v4_list)
+                v6_cidr_count = len(v6_list)
             elif label.startswith("Step 2") or ("Masscan" in label and "端口" in label):
                 total_open = result
             elif label.startswith("Step 3") or ("CF 检测" in label):
@@ -1301,16 +1394,38 @@ def main() -> None:
                     parsed.append(line)
 
         with open(csv_path, "w") as f:
-            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
+            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
             for p in parsed:
-                f.write(p + "\n")
+                ip_part = p.split(",")[0]
+                proto = "IPv6" if ":" in ip_part else "IPv4"
+                f.write(p + f",{proto}\n")
+
+        print(c(f"\n  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
+
+    elif cfg.ip_mode == "v6":
+        # v6-only mode: export CIDR list if no scan results
+        v6_file = BASE / "cidrs_v6.txt"
+        if v6_file.exists() and v6_file.stat().st_size > 0:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tag = "_".join(asns) if asns else "cidr"
+            csv_path = BASE / f"output_v6_{tag}_{ts}.csv"
+            with open(v6_file) as f:
+                cidrs = [l.strip() for l in f if l.strip()]
+            with open(csv_path, "w") as f:
+                f.write("CIDR,IP数量,协议\n")
+                for c in cidrs:
+                    cnt = _cidr_count([c])
+                    f.write(f"{c},{cnt},IPv6\n")
+            print(c(f"\n  IPv6 CIDR: {len(cidrs)} 段 -> {csv_path.name}", C.G))
 
     print_result_header(
         len(asns),
         cidr_count,
         total_open,
         cf_nodes,
-        passed_count
+        passed_count,
+        v4_cidr_count,
+        v6_cidr_count
     )
 
     print_sep("-", C.W)

@@ -127,13 +127,20 @@ def write_progress_done(extra: str = "") -> None:
 
 
 def print_result_header(total_asn: int, total_cidr: int,
-                        total_open: int, cf_nodes: int, passed: int) -> None:
+                        total_open: int, cf_nodes: int, passed: int,
+                        v4_cidr: int = 0, v6_cidr: int = 0) -> None:
     """打印结果摘要头部"""
     sep = c("=" * 60, C.G)
+    cidr_info = str(total_cidr)
+    if v4_cidr or v6_cidr:
+        parts = []
+        if v4_cidr: parts.append(f"v4={v4_cidr}")
+        if v6_cidr: parts.append(f"v6={v6_cidr}")
+        cidr_info += f" ({', '.join(parts)})"
     print()
     print(sep)
     print(c("  [TASK COMPLETE]", C.LG))
-    print(c(f"  ASN: {total_asn}  |  CIDR: {total_cidr}  |  "
+    print(c(f"  ASN: {total_asn}  |  CIDR: {cidr_info}  |  "
             f"Open Ports: {total_open}  |  CF Nodes: {cf_nodes}  |  "
             f"Passed: {passed}", C.W))
     print(sep)
