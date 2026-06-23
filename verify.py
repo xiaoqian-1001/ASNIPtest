@@ -82,19 +82,32 @@ def main() -> None:
     parser.add_argument("--api", default="https://api.090227.xyz/check")
     parser.add_argument("--chunk", type=int, default=5000, help="分片大小")
     parser.add_argument("--concurrent", type=int, default=32, help="并发数")
+    parser.add_argument("--append", action="store_true",
+                        help="追加模式（不覆盖已有结果）")
+    parser.add_argument("--follow", action="store_true",
+                        help="流式模式（从 stdin 读取，EOF 为结束）")
     args = parser.parse_args()
 
-    lines = _read_input(args.input)
+    if args.follow:
+        lines = [l.strip() for l in sys.stdin if l.strip()]
+    else:
+        lines = _read_input(args.input)
     total = len(lines)
     if total == 0:
-        print("  输入为空，跳过")
         sys.exit(0)
 
     passed = 0
     start = time.time()
 
-    with open(args.output, "w") as out:
-        out.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
+    mode = "a" if args.append else "w"
+    header = "IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n"
+    with open(args.output, mode) as out:
+        if args.append:
+            existing = Path(args.output).exists() and Path(args.output).stat().st_size > 0
+            if not existing:
+                out.write(header)
+        else:
+            out.write(header)
         for i in range(0, total, args.chunk):
             chunk = lines[i:i + args.chunk]
             with ThreadPoolExecutor(max_workers=args.concurrent) as ex:

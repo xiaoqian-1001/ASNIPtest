@@ -11,6 +11,7 @@ import time
 import json
 import random
 import socket
+import threading
 import argparse
 import subprocess
 import urllib.request
@@ -19,7 +20,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.utils import (
@@ -288,24 +289,71 @@ def ensure_cf_scanner() -> None:
         CF_SCANNER.chmod(0o755)
 
 
+# ── ASN 缓存 ──
+
+_ASN_CACHE = BASE / ".asn_cache.json"
+_ASN_CACHE_TTL = 7 * 86400  # 7 天
+
+
+def _asn_cache_load() -> dict[str, Any]:
+    try:
+        if _ASN_CACHE.exists():
+            data = json.loads(_ASN_CACHE.read_bytes())
+            if isinstance(data, dict):
+                return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _asn_cache_save(data: dict[str, Any]) -> None:
+    try:
+        _ASN_CACHE.write_text(json.dumps(data, ensure_ascii=False))
+    except OSError:
+        pass
+
+
 # ── Pipeline Steps ──
 
 def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
     cidrs: list[str] = []
+    cache = _asn_cache_load()
+    now_ts = time.time()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     for asn in asns:
+        cache_key = f"AS{asn}"
+        if cache_key in cache and now_ts - cache[cache_key].get("ts", 0) < _ASN_CACHE_TTL:
+            entry = cache[cache_key]
+            cidrs.extend(entry["cidrs"])
+            age_h = (now_ts - entry["ts"]) / 3600
+            print(f"  AS{asn} -> {entry['count']} 个 IPv4 CIDR (缓存, {age_h:.1f}h前)")
+            continue
+
         url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
             count = 0
+            prefixes: list[str] = []
             for p in data["data"]["prefixes"]:
                 if ":" not in p["prefix"]:
+                    prefixes.append(p["prefix"])
                     cidrs.append(p["prefix"])
                     count += 1
+            cache[cache_key] = {"ts": now_ts, "count": count,
+                                "cidrs": prefixes, "updated": now_str}
             print(f"  AS{asn} -> {count} 个 IPv4 CIDR")
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
-            print(f"  AS{asn} -> 失败: {e}")
+        except (urllib.error.URLError, json.JSONDecodeError, OSError,
+                KeyError) as e:
+            if cache_key in cache:
+                cidrs.extend(cache[cache_key]["cidrs"])
+                print(f"  AS{asn} -> {e}, 使用上次缓存 ({cache[cache_key]['count']} CIDR)")
+            else:
+                print(f"  AS{asn} -> 失败: {e}")
+
+    _asn_cache_save(cache)
     (BASE / "cidrs.txt").write_text("\n".join(cidrs))
     print(f"  共 {len(cidrs)} 个 CIDR")
     if not cidrs:
@@ -415,29 +463,66 @@ def step_masscan(cfg: ScannerConfig) -> int:
     return len(all_open)
 
 
-def step_cf_scan(cfg: ScannerConfig) -> int:
+def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
+    """流式流水线: cf-scanner + API 精筛合并执行"""
     input_file = BASE / "masscan_result.txt"
     hits_file = BASE / "cf_hits.txt"
+    verified_file = BASE / "verified.txt"
 
     if input_file.stat().st_size == 0:
-        print("  无开放端口，跳过")
-        return 0
+        return 0, 0
 
     ensure_cf_scanner()
+    hits_file.write_text("")
+    verified_file.write_text("")
 
     adj = _adjust_concurrency(cfg.cf_concurrency, cfg.cpu)
     if adj != cfg.cf_concurrency:
         print(f"  cf-scanner 并发: {cfg.cf_concurrency} -> {adj} (系统负载)")
         cfg.cf_concurrency = adj
 
+    # ── cf-scanner (前台, 显示进度) ──
     proc = subprocess.Popen(
         [str(CF_SCANNER), "-i", str(input_file), "-o", str(hits_file),
          "-c", str(cfg.cf_concurrency)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
+    # 后台精筛: hits 一出现就静默启动
+    verify_running = threading.Event()
+    cf_done = threading.Event()
+
+    def _bg_verify() -> None:
+        for _ in range(60):
+            try:
+                if hits_file.stat().st_size > 200:
+                    break
+            except OSError:
+                pass
+            if cf_done.is_set():
+                return
+            time.sleep(1)
+        verify_running.set()
+        try:
+            adj_api = _adjust_concurrency(cfg.api_concurrency, cfg.cpu)
+            subprocess.run([
+                sys.executable, str(VERIFY_PY),
+                "--input", str(hits_file),
+                "--output", str(verified_file),
+                "--api", API_URL,
+                "--chunk", str(cfg.api_chunk),
+                "--concurrent", str(adj_api),
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except Exception:
+            pass
+        verify_running.clear()
+
+    vt = threading.Thread(target=_bg_verify, daemon=True)
+    vt.start()
+
     pat = re.compile(r"(\d+\.?\d*)%")
     last_pct = -1
     t0 = time.time()
+
     for line in proc.stdout:
         m = pat.search(line)
         if m:
@@ -445,8 +530,9 @@ def step_cf_scan(cfg: ScannerConfig) -> int:
             if abs(pct - last_pct) >= 0.5:
                 elapsed = time.time() - t0
                 eta = (elapsed / pct * (100 - pct)) if pct > 0 else 0
+                tag = " | 精筛并行" if verify_running.is_set() else ""
                 extra = f" | ETA {int(eta // 60)}m {int(eta % 60)}s" if pct > 0.5 else ""
-                write_progress(pct, extra)
+                write_progress(pct, tag + extra)
                 last_pct = pct
     proc.wait()
 
@@ -455,40 +541,31 @@ def step_cf_scan(cfg: ScannerConfig) -> int:
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     write_progress_done()
+    cf_done.set()
+
     with open(hits_file) as f:
         hits = sum(1 for _ in f)
-    print(f"  CF 节点: {hits}")
-    return hits
 
-
-def step_api_verify(cfg: ScannerConfig) -> int:
-    hits_file = BASE / "cf_hits.txt"
-    verified_file = BASE / "verified.txt"
-
-    if not hits_file.exists() or hits_file.stat().st_size == 0:
-        print("  无 CF 节点，跳过")
-        if verified_file.exists():
-            verified_file.unlink()
-        return 0
-
-    adj = _adjust_concurrency(cfg.api_concurrency, cfg.cpu)
-    if adj != cfg.api_concurrency:
-        print(f"  API 并发: {cfg.api_concurrency} -> {adj} (系统负载)")
-        cfg.api_concurrency = adj
-
+    # ── 最终精筛 (前台, 覆盖后台结果, 确保完整) ──
+    vt.join(timeout=300)
+    adj_api = _adjust_concurrency(cfg.api_concurrency, cfg.cpu)
     subprocess.run([
         sys.executable, str(VERIFY_PY),
         "--input", str(hits_file),
         "--output", str(verified_file),
         "--api", API_URL,
         "--chunk", str(cfg.api_chunk),
-        "--concurrent", str(cfg.api_concurrency),
+        "--concurrent", str(adj_api),
     ], check=True)
 
     with open(verified_file) as f:
-        passed = sum(1 for _ in f)
-    print(f"  精筛通过: {passed}")
-    return passed
+        passed = sum(1 for _ in f) - 1
+    passed = max(0, passed)
+
+    print(f"  CF 节点: {hits}")
+    rate = f"{passed / hits * 100:.0f}%" if hits else "0%"
+    print(f"  精筛通过: {rate} ({passed}/{hits})")
+    return hits, passed
 
 
 def step_speed_test(cfg: ScannerConfig) -> None:
@@ -720,6 +797,8 @@ def main() -> None:
                         help="随机 5 端口快速探测")
     parser.add_argument("-r", "--rate", metavar="PPS", type=int,
                         help="masscan 发包速率 (默认自动探测)")
+    parser.add_argument("--skip-masscan", action="store_true",
+                        help="跳过 masscan，使用已有 masscan_result.txt")
     parser.add_argument("-v", "--version", action="version",
                         version=f"ASNIPtest {VERSION}")
     a = parser.parse_args()
@@ -775,7 +854,7 @@ def main() -> None:
         if cp:
             cfg.scan_ports = cp
 
-    total_steps = 4
+    total_steps = 2 if a.skip_masscan else 3
     do_speed = a.speed
     if not do_speed:
         try:
@@ -789,17 +868,21 @@ def main() -> None:
         print("  跳过测速\n")
 
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("1. ASN->CIDR",   lambda: step_fetch_prefixes(cfg, asns)),
-        ("2. masscan",     lambda: step_masscan(cfg)),
-        ("3. cf-scanner",  lambda: step_cf_scan(cfg)),
-        ("4. API精筛",      lambda: step_api_verify(cfg)),
+        ("1. ASN->CIDR", lambda: step_fetch_prefixes(cfg, asns)),
     ]
+    if a.skip_masscan:
+        print("  --skip-masscan: 跳过 masscan，使用已有 masscan_result.txt")
+    else:
+        steps.append(("2. masscan", lambda: step_masscan(cfg)))
+    steps.append((
+        f"{'3' if not a.skip_masscan else '2'}. 扫描+精筛",
+        lambda: _pipeline(cfg),
+    ))
     if do_speed:
         steps.append((f"{total_steps}. 测速", lambda: step_speed_test(cfg)))
 
     # 清理上次运行的中间文件，防止残留数据污染
-    for stale in ("cidrs.txt", "masscan_result.txt",
-                  "masscan_result.xml", "cf_hits.txt", "verified.txt"):
+    for stale in ("cidrs.txt", "masscan_result.xml", "cf_hits.txt", "verified.txt"):
         p = BASE / stale
         try:
             if p.exists():
@@ -809,6 +892,13 @@ def main() -> None:
     for p in BASE.glob("masscan_batch_*.xml"):
         try:
             p.unlink()
+        except OSError:
+            pass
+    if not a.skip_masscan:
+        mp = BASE / "masscan_result.txt"
+        try:
+            if mp.exists():
+                mp.unlink()
         except OSError:
             pass
 
