@@ -425,6 +425,8 @@ def _read_masscan_stderr(proc, prefix: str = "") -> list[str]:
 
     idx = 0
     seen_100 = False
+    batch_start = time.time()  # 批次开始时间
+    batch_timeout = 120  # 单批次最长 120 秒 (防止 Windows 卡死)
     while True:
         t.join(timeout=0.3)
 
@@ -453,6 +455,13 @@ def _read_masscan_stderr(proc, prefix: str = "") -> list[str]:
 
         # 100% 后最久等 10s 兜底 (Windows poll/pipe 可能不可靠)
         if seen_100 and time.time() - last_progress > 10:
+            break
+
+        # 单批次超时 (Windows 卡死保护)
+        if time.time() - batch_start > batch_timeout:
+            proc.kill()
+            proc.wait()
+            print(c(f"  [WARN] 批次超时 {batch_timeout}s,强制终止", C.Y))
             break
 
         # 60s 无进度 → kill
