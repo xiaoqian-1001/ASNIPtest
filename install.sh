@@ -23,8 +23,8 @@ read_version() { cat "$VERSION_FILE" 2>/dev/null || echo "unknown"; }
 logo() {
     echo -e "${CYAN}${BOLD}"
     echo "   =============================="
-    echo "         ASNIPtest  $(read_version)"
-    echo "   ASN -> masscan -> CF 节点"
+    echo "          IP-Tidy  $(read_version)"
+    echo "    CIDR/ASN -> masscan -> CF"
     echo "   =============================="
     echo -e "${NC}"
 }
@@ -45,7 +45,7 @@ go_required_version() {
 # ── 卸载 ──
 do_uninstall() {
     echo ""
-    echo -e "${YELLOW}确认卸载 ASNIPtest？此操作不可撤销。${NC}"
+    echo -e "${YELLOW}确认卸载 IP-Tidy？此操作不可撤销。${NC}"
     read -rp "  输入 yes 确认: " confirm
     if [ "$confirm" != "yes" ]; then
         info "已取消"
@@ -221,7 +221,8 @@ WEOF
         warn "请手动运行: python3 $PROJECT_DIR/run.py"
     }
     $SUDO chmod +x "$w"
-    info "命令: xiaoqian [ASN...] [-p PORTS] [-s]"
+    info "命令: xiaoqian [ASN/CIDR...] [-p PORTS] [-w] [-s] [-d] [-g]"
+    info "       xiaoqian -g (下载离线 GeoIP 数据库)"
     info "       xiaoqian update / uninstall"
 
     echo ""
