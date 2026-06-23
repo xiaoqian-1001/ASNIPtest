@@ -32,6 +32,7 @@ from lib.utils import (
     parse_ports,
     port_is_free,
     kill_port_process,
+    c, C, print_banner, print_step, print_sep,
 )
 
 BASE = Path(__file__).parent.resolve()
@@ -317,8 +318,8 @@ def init_runtime() -> ScannerConfig:
         lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
     cfg.scan_ports = ",".join(lines)
 
-    print(f"  硬件: {cfg.cpu}核 {cfg.ram_mb}MB  "
-          f"masscan={cfg.masscan_rate}pps  cf={cfg.cf_concurrency}c  api={cfg.api_concurrency}c")
+    print(c(f"  CPU: {cfg.cpu}核  MEM: {cfg.ram_mb}MB  "
+             f"masscan: {cfg.masscan_rate}pps  cf: {cfg.cf_concurrency}c  api: {cfg.api_concurrency}c", C.D))
 
     cfg.global_ip, cfg.global_country, cfg.global_isp = detect_isp(get_public_ip())
     return cfg
@@ -326,7 +327,7 @@ def init_runtime() -> ScannerConfig:
 
 def ensure_cf_scanner() -> None:
     if not CF_SCANNER.is_file():
-        print("  [FAIL] cf-scanner 未找到，请先编译: cd cf-scanner-src && go build -o ../cf-scanner main.go")
+        print(c("  [FAIL] cf-scanner 未找到，请先编译: cd cf-scanner-src && go build -o ../cf-scanner main.go", C.R2))
         sys.exit(1)
     if not os.access(CF_SCANNER, os.X_OK):
         CF_SCANNER.chmod(0o755)
@@ -400,7 +401,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
     (BASE / "cidrs.txt").write_text("\n".join(cidrs))
     print(f"  共 {len(cidrs)} 个 CIDR")
     if not cidrs:
-        print("  [FAIL] 无可用 CIDR，请检查 ASN 是否正确")
+        print(c("  [FAIL] 无可用 CIDR，请检查 ASN 是否正确", C.R2))
         sys.exit(1)
     return cidrs
 
@@ -408,7 +409,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str]) -> list[str]:
 def step_masscan(cfg: ScannerConfig) -> int:
     ip_file = BASE / "cidrs.txt"
     if not ip_file.exists() or ip_file.stat().st_size == 0:
-        print("  [FAIL] cidrs.txt 为空，跳过 masscan")
+        print(c("  [FAIL] cidrs.txt 为空，跳过 masscan", C.R2))
         return 0
 
     xml_file = BASE / "masscan_result.xml"
@@ -460,18 +461,18 @@ def step_masscan(cfg: ScannerConfig) -> int:
             sys.stderr.flush()
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "init: failed" in err:
-                print("  [FAIL] masscan 需要 raw socket 权限")
+                print(c("  [FAIL] masscan 需要 raw socket 权限", C.R2))
                 if os.geteuid() != 0:
                     print("  解决: sudo python3 run.py ...  (以 root 运行)")
                     print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
             elif "password is required" in err or "a password is required" in err:
-                print("  [FAIL] sudo 需要密码交互，当前环境无法输入")
+                print(c("  [FAIL] sudo 需要密码交互，当前环境无法输入", C.R2))
                 print("  解决: sudo python3 run.py ...  (以 root 运行)")
                 print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
             else:
                 sys.stderr.write("".join(stderr_lines))
                 sys.stderr.flush()
-                print(f"\n  [FAIL] masscan 返回码 {proc.returncode}")
+                print(c(f"\n  [FAIL] masscan 返回码 {proc.returncode}", C.R2))
             raise subprocess.CalledProcessError(
                 proc.returncode, cmd, output=None,
                 stderr="".join(stderr_lines))
@@ -620,7 +621,7 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
 
     print(f"  CF 节点: {hits}")
     rate = f"{passed / hits * 100:.0f}%" if hits else "0%"
-    print(f"  精筛通过: {rate} ({passed}/{hits})")
+    print(c(f"  精筛通过: {rate} ({passed}/{hits})", C.G if passed else C.D))
     return hits, passed
 
 
@@ -706,7 +707,7 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
             sys.stderr.write("\n"); sys.stderr.flush()
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "password is required" in err:
-                print("  [FAIL] masscan 权限不足")
+                print(c("  [FAIL] masscan 权限不足", C.R2))
             raise subprocess.CalledProcessError(proc.returncode, cmd,
                                                 output=None, stderr="".join(stderr_lines))
 
@@ -897,7 +898,7 @@ def output_csv(asns: list[str]) -> None:
         for p in parsed:
             f.write(p + "\n")
 
-    print(f"\n  结果: {len(parsed)} 条 -> {csv_path.name}")
+    print(c(f"\n  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
     _serve_download(csv_path)
 
 
@@ -919,11 +920,12 @@ def _serve_download(file_path: Path) -> None:
 
     server: Optional[subprocess.Popen] = None
     try:
-        print(f"\n  [download] 下载链接 (按回车关闭):")
-        print(f"  http://{lan_ip}:{port}/{file_path.name}  (本机)")
+        print_sep()
+        print(c("  Download (按回车关闭):", C.B))
+        print(f"  http://{lan_ip}:{port}/{file_path.name}")
         pub = get_public_ip()
         if pub not in ("127.0.0.1", lan_ip):
-            print(f"  http://{pub}:{port}/{file_path.name}  (公网)")
+            print(f"  http://{pub}:{port}/{file_path.name}")
         print()
         server = subprocess.Popen(
             [sys.executable, "-m", "http.server", str(port),
@@ -1019,6 +1021,7 @@ def main() -> None:
                         version=f"ASNIPtest {VERSION}")
     a = parser.parse_args()
 
+    print_banner()
     cfg = init_runtime()
     asns = _parse_asns(sys.argv[1:] if not a.asns else a.asns)
 
@@ -1026,7 +1029,7 @@ def main() -> None:
         print("用法: xiaoqian AS209242 [AS3214 ...] [-p PORTS] [-s]")
         sys.exit(1)
 
-    print(f"\n  ASN: {', '.join(f'AS{x}' for x in asns)}\n")
+    print(c(f"  Target: {', '.join(f'AS{x}' for x in asns)}", C.B))
 
     if a.rate:
         cfg.masscan_rate = max(100, a.rate)
@@ -1035,7 +1038,7 @@ def main() -> None:
     if a.ports:
         cfg.scan_ports = parse_ports(a.ports)
         if not cfg.scan_ports:
-            print(f"  [FAIL] 无效端口: {a.ports}")
+            print(c(f"  [FAIL] 无效端口: {a.ports}", C.R2))
             sys.exit(1)
         print(f"  自定义端口: {cfg.scan_ports}")
     elif a.wide:
@@ -1093,22 +1096,22 @@ def main() -> None:
         print("  跳过测速\n")
 
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("1. ASN->CIDR", lambda: step_fetch_prefixes(cfg, asns)),
+        ("Step 1  ASN -> CIDR 前缀", lambda: step_fetch_prefixes(cfg, asns)),
     ]
     step_num = 1
     if a.skip_masscan:
-        print("  --skip-masscan: 跳过 masscan，使用已有 masscan_result.txt")
+        print(c("  (跳过 masscan, 使用已有结果)", C.D))
     else:
         step_num += 1
-        steps.append((f"{step_num}. masscan", lambda: step_masscan(cfg)))
+        steps.append((f"Step {step_num}  masscan 端口扫描", lambda: step_masscan(cfg)))
     step_num += 1
-    steps.append((f"{step_num}. 扫描+精筛", lambda: _pipeline(cfg)))
+    steps.append((f"Step {step_num}  CF 检测 + API 精筛", lambda: _pipeline(cfg)))
     if do_deep:
         step_num += 1
-        steps.append((f"{step_num}. 深度扫描", lambda: step_deep_scan(cfg)))
+        steps.append((f"Step {step_num}  深度宽端口追加", lambda: step_deep_scan(cfg)))
     if do_speed:
         step_num += 1
-        steps.append((f"{step_num}. 测速", lambda: step_speed_test(cfg)))
+        steps.append((f"Step {step_num}  延迟 + 带宽测速", lambda: step_speed_test(cfg)))
 
     # 清理上次运行的中间文件，防止残留数据污染
     for stale in ("cidrs.txt", "masscan_result.xml", "cf_hits.txt", "verified.txt"):
@@ -1144,15 +1147,17 @@ def main() -> None:
             pass
 
     for label, fn in steps:
-        print(f"\n  [{label}]")
+        print_step(label)
         try:
             fn()
         except Exception as e:
-            print(f"  [FAIL] {e}")
+            print(c(f"  [FAIL] {e}", C.R2))
             sys.exit(1)
 
     output_csv(asns)
-    print("\n[OK] 完成\n")
+    print_sep()
+    print(c("  [OK] 完成", C.G))
+    print()
 
 
 if __name__ == "__main__":

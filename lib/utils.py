@@ -20,11 +20,57 @@ __all__ = [
     "BAR_WIDTH", "write_progress", "write_progress_done",
     "get_public_ip", "get_lan_ip", "detect_isp",
     "parse_ports", "port_is_free", "kill_port_process",
+    "c", "C", "print_banner", "print_step", "print_sep",
 ]
 
 BAR_WIDTH = 30
 _FILL = "\u2588"
 _EMPTY = "\u2591"
+
+# ── ANSI 颜色 ──
+
+class C:
+    R = "\033[0m"
+    B = "\033[1m"
+    D = "\033[2m"
+    G = "\033[32m"
+    Y = "\033[33m"
+    R2 = "\033[31m"
+    C = "\033[36m"
+    M = "\033[35m"
+
+
+def c(text: str, color: str) -> str:
+    if sys.stdout.isatty():
+        return f"{color}{text}{C.R}"
+    return text
+
+
+# ── 美化输出 ──
+
+def print_banner() -> None:
+    name = "ASNIPtest"
+    try:
+        vp = Path(__file__).resolve().parent.parent / "VERSION"
+        ver = vp.read_text().strip() if vp.is_file() else ""
+    except OSError:
+        ver = ""
+    tag = f" {ver}" if ver else ""
+    w = 50
+    print()
+    print(c("  " + "=" * w, C.C))
+    print(c(f"    {name}{tag}", C.B + C.C))
+    print(c(f"    ASN -> CIDR -> masscan -> CF Node -> CSV", C.D))
+    print(c("  " + "=" * w, C.C))
+    print()
+
+
+def print_step(label: str) -> None:
+    print(c(f"\n  [{label}]", C.B + C.C))
+
+
+def print_sep() -> None:
+    print(c("  " + "-" * 40, C.D))
 
 
 def write_progress(pct: float, extra: str = "") -> None:
