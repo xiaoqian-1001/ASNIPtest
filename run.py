@@ -485,6 +485,8 @@ def step_masscan(cfg: ScannerConfig) -> int:
                            stdin=subprocess.DEVNULL, check=False)
 
         # Parse batch XML
+        if batch_total > 1:
+            print(f"  解析 {batch_xml.name} ...", flush=True)
         try:
             tree = ET.parse(batch_xml)
             for host in tree.getroot().findall("host"):
