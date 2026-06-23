@@ -55,7 +55,7 @@ def print_banner() -> None:
         ver = vp.read_text().strip() if vp.is_file() else ""
     except OSError:
         ver = ""
-    tag = f" v{ver}" if ver else ""
+    tag = f" {ver}" if ver else ""
     w = 50
     print()
     print(c("  " + "=" * w, C.C))
