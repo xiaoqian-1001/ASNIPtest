@@ -103,22 +103,34 @@ def _split_port_batches(port_str: str) -> list[str]:
     current: list[str] = []
     cur = 0
     for seg in segments:
-        n = 1
         if "-" in seg:
             try:
                 a, b = seg.split("-", 1)
-                n = int(b) - int(a) + 1
+                pa, pb = int(a), int(b)
+                n = pb - pa + 1
             except ValueError:
-                pass
+                n = 1
+                pa = pb = 0
+        else:
+            n = 1
+
         if cur + n > _MASSCAN_BATCH and current:
             batches.append(",".join(current))
             current = []
             cur = 0
-        current.append(seg)
-        cur += n
+
+        # 拆分超大范围 (如 10000-65535) 为多个子批次
+        if n > _MASSCAN_BATCH:
+            for start in range(pa, pb + 1, _MASSCAN_BATCH):
+                end = min(start + _MASSCAN_BATCH - 1, pb)
+                batches.append(f"{start}-{end}")
+        else:
+            current.append(seg)
+            cur += n
+
     if current:
         batches.append(",".join(current))
-    return batches if len(batches) > 1 else [port_str]
+    return batches
 
 
 def _get_system_load() -> tuple[float, int]:
