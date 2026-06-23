@@ -1,8 +1,8 @@
-# IP-Tidy
+# IP-Tidy v2.0.1
 
-> **小钱 ASN NSD TOOL** -- ASN / CIDR -> Masscan -> TLS 检测 -> CF 节点 CSV
+> **xiaoqian ASN NSD TOOL** -- ASN / CIDR -> Masscan -> TLS 检测 -> CF 节点 CSV
 
-一键输入 ASN 或 CIDR，自动完成 IP 段解析、高速端口扫描、Cloudflare 反代节点检测，输出结构化 CSV 并提供 HTTP 下载。
+一键输入 ASN 或 CIDR（支持 IPv4/IPv6），自动完成 IP 段解析、高速端口扫描、Cloudflare 反代节点检测，输出结构化 CSV 并提供 HTTP 下载。
 
 ---
 
@@ -10,6 +10,8 @@
 
 | 特性 | 说明 |
 |------|------|
+| 双栈支持 | IPv4 / IPv6 CIDR 全链路解析、合并、去重、分离导出 |
+| 离线 GeoIP | 内置 MaxMind GeoLite2 数据库，无需网络查 ISP/地区/ASN |
 | 多输入源 | 支持 ASN 编号、CIDR 网段、混合输入 |
 | 深度扫描 | 二阶段宽端口扫描，发现隐藏高位端口 |
 | 流式流水线 | cf-scanner 与 API 精筛并行，缩短等待 |
@@ -30,8 +32,9 @@ curl -fsSL https://raw.githubusercontent.com/xiaoqian-1001/IP-Tidy/main/install.
 # 基础用法
 ip-tidy AS209242                     # 单个 ASN
 ip-tidy AS209242,AS3214              # 多个 ASN (逗号)
-ip-tidy 1.2.3.0/24                   # 单个 CIDR
-ip-tidy 1.2.3.0/24,5.6.7.0/24      # 多个 CIDR
+ip-tidy 1.2.3.0/24                   # 单个 IPv4 CIDR
+ip-tidy 1.2.3.0/24,5.6.7.0/24      # 多个 IPv4 CIDR
+ip-tidy 2001:db8::/32                # 单个 IPv6 CIDR
 ip-tidy AS209242,1.2.3.0/24         # ASN + CIDR 混合
 
 # 选项
@@ -42,6 +45,9 @@ ip-tidy AS209242 -d                  # 深度扫描 (命中 IP 追加宽端口)
 ip-tidy AS209242 -s                  # 扫描后自动测速
 ip-tidy AS209242 -r 4000             # 指定发包速率
 ip-tidy AS209242 -w -d -s            # 组合使用
+ip-tidy AS209242 --v4-only           # 仅处理 IPv4
+ip-tidy AS209242 --v6-only           # 仅处理 IPv6 (导出 CIDR 列表)
+ip-tidy AS209242 -g                  # 下载离线 GeoIP 数据库
 
 # 断点续扫
 ip-tidy AS209242 --skip-masscan      # 跳过 masscan，使用已有结果
@@ -55,12 +61,44 @@ ip-tidy uninstall                    # 卸载
 
 ---
 
+## 离线 GeoIP (`-g`)
+
+内置 MaxMind GeoLite2 免费数据库，下载后无需网络即可查询本机 ISP、地区、ASN。
+
+```bash
+# 首次使用: 下载离线数据库
+ip-tidy -g
+# 按提示访问 maxmind.com 免费注册获取 License Key
+# 数据库保存到 ~/.config/ip-tidy/
+
+# 日常运行自动优先使用离线库，无库时回退 ipinfo.io
+ip-tidy AS209242
+# 输出: [GeoIP] 离线数据库 (MaxMind GeoLite2)
+#        地区: Shanghai, CN  机构: Alibaba
+```
+
+---
+
+## IPv6 支持
+
+| 功能 | 说明 |
+|------|------|
+| CIDR 输入 | `2001:db8::/32` 自动识别 IPv6 |
+| ASN 前缀 | RIPEStat API 同步拉取 IPv6 前缀 |
+| 合并去重 | `ipaddress.collapse_addresses` 自动合并 |
+| 分离导出 | `--v4-only` / `--v6-only` 按协议族过滤 |
+| 导出格式 | `--v6-only` 导出 `output_v6_*.csv` CIDR 清单 |
+
+> masscan 仅支持 IPv4，`--v6-only` 模式自动跳过扫描阶段，直接导出前缀列表。
+
+---
+
 ## 工作流程
 
 ```mermaid
 graph LR
-    A["ASN / CIDR"] --> B["RIPEStat API + 缓存<br/>IPv4 前缀解析"]
-    B --> C["masscan<br/>SYN 端口扫描"]
+    A["ASN / CIDR (v4+v6)"] --> B["RIPEStat API + 缓存<br/>IPv4/IPv6 前缀解析"]
+    B --> C["masscan<br/>v4 CIDR SYN 扫描"]
     C --> D["cf-scanner + API<br/>TLS 检测 + 精筛并行"]
     D --> E["深度扫描 (可选)<br/>命中 IP 追加宽端口"]
     E --> F["测速 (可选)<br/>延迟 + 带宽"]
@@ -69,7 +107,7 @@ graph LR
 
 | # | 步骤 | 说明 |
 |---|------|------|
-| 1 | ASN/CIDR -> 前缀 | RIPEStat API 拉取 IPv4 前缀 (7天缓存)，CIDR 直通 |
+| 1 | ASN/CIDR -> 前缀 | RIPEStat API 拉取 IPv4/IPv6 前缀 (7天缓存)，CIDR 直通 |
 | 2 | masscan | 自适应速率 SYN 扫描，XML 解析，仅保留 syn-ack |
 | 3 | CF 检测 + 精筛 | Go cf-scanner TLS 握手检测 + API 二次验证 |
 | 4 | 深度扫描 (可选) | 对命中 IP 追加宽端口，两阶段产出最大化 |
@@ -92,7 +130,6 @@ graph LR
 |------|------|
 | 一键脚本 | `curl -fsSL https://raw.githubusercontent.com/xiaoqian-1001/IP-Tidy/main/install.sh \| bash` |
 | 手动安装 | `git clone --depth 1 https://github.com/xiaoqian-1001/IP-Tidy.git ~/IP-Tidy && cd ~/IP-Tidy/cf-scanner-src && go build -o ../cf-scanner main.go` |
-| Docker | `docker build -t ip-tidy . && docker run --rm --cap-add=NET_RAW --network host ip-tidy AS209242` |
 
 **Windows** 用户先安装 WSL2：`wsl --install`，重启后在 Ubuntu 终端执行一键安装。
 
@@ -117,6 +154,7 @@ http://1.2.3.4:8899/output_AS209242_20260623_120000.csv
 | 网络延迟 | `42` | ms |
 | 下载速度 | `5.12` | Mbps |
 | ASN | `AS209242` | 来源 ASN |
+| 协议 | `IPv4` | IPv4 或 IPv6 |
 
 ---
 
@@ -127,6 +165,7 @@ IP-Tidy/
   run.py                 主入口，流程编排 + 交互界面
   verify.py              API 精筛 (含重试)
   lib/utils.py           公共工具 (进度条 / 网络检测 / 端口解析)
+  lib/geoip.py           离线 IP 地理信息查询 (MaxMind GeoLite2)
   cf-scanner-src/        Go 源码 (TLS 握手检测)
   cf-scanner             编译产物 (gitignore)
   install.sh             一键安装
@@ -159,10 +198,11 @@ IP-Tidy/
 | [masscan](https://github.com/robertdavidgraham/masscan) | 高速 SYN 端口扫描 |
 | Go >= 1.22 | 编译 cf-scanner (TLS 握手检测) |
 | Python >= 3.8 | 流程编排、API 验证、交互界面 |
+| maxminddb | GeoLite2 离线数据库读取 (pypi) |
 | dnsutils | DNS 方式获取公网 IP |
 | [RIPEStat API](https://stat.ripe.net/) | ASN -> CIDR (免费公开) |
 
-> `install.sh` 自动安装所有依赖。
+> `install.sh` 自动安装所有依赖 (含 `pip3 install maxminddb`)。
 
 ### 环境限制
 
@@ -171,6 +211,14 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：NAT 容器、OpenVZ/LXC (
 ---
 
 ## 更新日志
+
+### v2.0.1
+- IPv6 CIDR 全链路: 解析/合并/去重/分离导出
+- `--v4-only` / `--v6-only` 协议族过滤开关
+- RIPEStat API 同步拉取 IPv6 前缀
+- 离线 GeoIP: 内置 MaxMind GeoLite2，`-g` 下载更新
+- CSV 新增协议列 (IPv4/IPv6)，v6-only 导出 CIDR 清单
+- install.sh 自动安装 maxminddb 依赖
 
 ### v2.0.0
 - 项目更名为 IP-Tidy (原 ASNIPtest)
