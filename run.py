@@ -1375,7 +1375,7 @@ def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]
             arg = raw_args[i]
             if arg in ("-p", "-r"):
                 i += 2
-            elif arg in ("-s", "-w", "-R", "-d", "--v4-only", "--v6-only", "--smart"):
+            elif arg in ("-s", "-w", "-R", "-d", "--v4-only", "--v6-only", "--smart", "--no-cert"):
                 i += 1
             else:
                 filtered.append(arg)
@@ -1455,6 +1455,8 @@ def main() -> None:
                         help="仅处理 IPv6 (跳过 masscan, 导出 IPv6 CIDR 列表)")
     parser.add_argument("--smart", action="store_true",
                         help="智能子网分级: 大 CIDR 拆 /24 抽样探活, 仅扫活跃子网")
+    parser.add_argument("--no-cert", action="store_true",
+                        help="跳过 TLS 证书反查步骤")
     a = parser.parse_args()
 
     if a.geo_update:
@@ -1574,8 +1576,25 @@ def main() -> None:
             else:
                 print(c("  [已跳过] 智能子网分级 (全量扫描)", C.G))
 
+    # ── 证书反查交互开关 ──
+    do_cert = True
+    if a.no_cert:
+        do_cert = False
+        print(c("  [已跳过] TLS 证书反查 (--no-cert)", C.G))
+    elif not sys.argv[1:] and not a.targets:
+        try:
+            ch = input(c("  是否启用 TLS 证书反查？(y/n, 回车默认开启): ", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ch = ""
+        if ch == "n":
+            do_cert = False
+            print(c("  [已跳过] TLS 证书反查 (手动关闭)", C.G))
+        else:
+            print(c("  [已确认] TLS 证书反查 (SAN -> IP 扩充节点)", C.G))
+
     total_steps = 2 if a.skip_masscan else 3
-    total_steps += 1  # TLS 证书反查
+    if do_cert:
+        total_steps += 1  # TLS 证书反查
     do_speed = a.speed
     do_deep = a.deep
     if not do_speed:
@@ -1619,8 +1638,9 @@ def main() -> None:
         steps.append((f"Step {step_num}  Masscan 端口扫描", lambda: step_masscan(cfg)))
     step_num += 1
     steps.append((f"Step {step_num}  CF 检测 + API 精筛", lambda: _pipeline(cfg)))
-    step_num += 1
-    steps.append((f"Step {step_num}  TLS 证书反查", lambda: step_cert_enum(cfg)))
+    if do_cert:
+        step_num += 1
+        steps.append((f"Step {step_num}  TLS 证书反查", lambda: step_cert_enum(cfg)))
     if do_deep:
         step_num += 1
         steps.append((f"Step {step_num}  深度宽端口扫描", lambda: step_deep_scan(cfg)))
