@@ -1805,7 +1805,7 @@ def _serve_download(file_path: Path) -> None:
     try:
         print()
         print_sep("=", C.LB)
-        print(c("  Download - 按回车关闭服务", C.LG))
+        print(c("  下载服务已启动 (按回车关闭)", C.LG))
         print(c(f"  http://{lan_ip}:{port}/{file_path.name}", C.LB))
         pub = get_public_ip()
         if pub not in ("127.0.0.1", lan_ip):
@@ -1816,7 +1816,13 @@ def _serve_download(file_path: Path) -> None:
              "--directory", str(BASE)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if sys.stdin.isatty():
-            input()
+            import time as _time
+            print(c("  (请在浏览器中下载文件后按回车关闭服务)", C.LB))
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
+            _time.sleep(1.5)
         else:
             print(c("  (非交互终端，按 Ctrl+C 停止服务)", C.W))
             try:
