@@ -279,7 +279,7 @@ def step_cert_enum(cfg: ScannerConfig) -> int:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             with socket.create_connection((ip, int(port)), timeout=8) as sock:
-                with ctx.wrap_socket(sock, server_hostname=ip) as ssock:
+                with ctx.wrap_socket(sock, server_hostname="cloudflare.com") as ssock:
                     cert = ssock.getpeercert()
                     sans = []
                     for _, val in cert.get("subjectAltName", []):
@@ -306,6 +306,8 @@ def step_cert_enum(cfg: ScannerConfig) -> int:
             except Exception:
                 continue
             for san in sans:
+                if san.startswith("*"):
+                    continue
                 try:
                     resolved = socket.getaddrinfo(san, None, socket.AF_INET,
                                                   socket.SOCK_STREAM)
