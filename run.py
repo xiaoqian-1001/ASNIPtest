@@ -12,6 +12,7 @@ import time
 import json
 import random
 import socket
+import ssl
 import ipaddress
 import threading
 import argparse
@@ -57,6 +58,23 @@ _RANDOM_ZONES: list[tuple[int, int, int]] = [
 ]
 
 
+@dataclass
+class ScannerConfig:
+    cpu: int = 1
+    ram_mb: int = 512
+    masscan_rate: int = 2000
+    cf_concurrency: int = 200
+    api_concurrency: int = 8
+    api_chunk: int = 2000
+    scan_ports: str = "443,8443,2053,2083,2087,2096"
+    global_ip: str = ""
+    global_country: str = ""
+    global_isp: str = ""
+    global_city: str = ""
+    ip_mode: str = "all"  # "v4" | "v6" | "all"
+    smart_mode: bool = False
+
+
 def _split_v4_v6(cidrs: list[str]) -> tuple[list[str], list[str]]:
     """拆分 IPv4/IPv6 CIDR 列表，自动去重和合并"""
     v4, v6 = [], []
@@ -96,6 +114,268 @@ _SPEED_TESTS = [
     ("speed.cloudflare.com", "https://speed.cloudflare.com/__down?bytes=100000000", 100, "100MB"),
     ("cloudflare.cdn.openbsd.org", "https://cloudflare.cdn.openbsd.org/pub/OpenBSD/7.3/src.tar.gz", 0, "CDN"),
 ]
+
+_SUBNET_SPLIT = 24        # CIDR >= /20 拆分到此粒度
+_SUBNET_PROBE = 3         # 每子段抽样 IP 数
+_SUBNET_THRESHOLD = 20    # 前缀小于此值触发拆分
+_SUBNET_PORT = 443        # 探活端口
+_SUBNET_TIMEOUT = 3       # 探活超时
+
+
+def _subnet_split(cidr: str) -> list[str]:
+    """将 CIDR 拆分为 /SUBNET_SPLIT 子网"""
+    net = ipaddress.ip_network(cidr, strict=False)
+    if net.prefixlen >= _SUBNET_SPLIT:
+        return [str(net)]
+    return [str(s) for s in net.subnets(new_prefix=_SUBNET_SPLIT)]
+
+
+def _quick_probe(ip: str, port: int, timeout: float) -> bool:
+    """快速 TCP 探活，返回是否可达"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        result = s.connect_ex((ip, port))
+        s.close()
+        return result == 0
+    except OSError:
+        return False
+
+
+def _sample_ips(subnet: str, n: int) -> list[str]:
+    """从子网中随机抽样 n 个 IP"""
+    net = ipaddress.ip_network(subnet, strict=False)
+    hosts = list(net.hosts())
+    if len(hosts) <= n:
+        return [str(h) for h in hosts]
+    chosen = random.sample(hosts, n)
+    return [str(h) for h in chosen]
+
+
+def step_smart_subnet(cfg: ScannerConfig, v4_cidrs: list[str]) -> list[str]:
+    """存活预筛 + 子网分级: 大 CIDR 拆 /24 抽样探活，仅保留活跃子网"""
+    step_start = time.time()
+
+    if not v4_cidrs:
+        return []
+
+    to_probe: list[str] = []     # 子网列表
+    probe_map: dict[str, list[str]] = {}  # 子网 -> 原 CIDR 映射 (用于日志)
+
+    for c in v4_cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            to_probe.append(c)
+            continue
+        if net.prefixlen < _SUBNET_THRESHOLD:
+            subs = _subnet_split(c)
+            to_probe.extend(subs)
+            for s in subs:
+                probe_map[s] = c
+        else:
+            to_probe.append(c)
+            probe_map[c] = c
+
+    if len(to_probe) <= 1:
+        print(f"  待探子网: {len(to_probe)} 段，跳过")
+        return v4_cidrs
+
+    total_subs = len(to_probe)
+    total_samples = 0
+    alive_subs: set[str] = set()
+    dead_subs: list[str] = []
+
+    print(f"  子网分级: {len(v4_cidrs)} CIDR -> {total_subs} 子段 ("
+          f"每段抽 {_SUBNET_PROBE} IP 探活端口 {_SUBNET_PORT})")
+
+    with ThreadPoolExecutor(max_workers=min(total_subs, cfg.api_concurrency * 4)) as ex:
+        fmap: dict[Any, str] = {}
+        for sub in to_probe:
+            for ip in _sample_ips(sub, _SUBNET_PROBE):
+                total_samples += 1
+                fmap[ex.submit(_quick_probe, ip, _SUBNET_PORT, _SUBNET_TIMEOUT)] = sub
+
+        done = 0
+        for future in as_completed(fmap):
+            sub = fmap[future]
+            done += 1
+            if done % 50 == 0 or done == total_samples:
+                write_progress(done / total_samples * 100,
+                               f" | 探活 {done}/{total_samples}")
+            try:
+                if future.result():
+                    alive_subs.add(sub)
+            except Exception:
+                pass
+
+    write_progress_done(" | 探活完成")
+
+    for sub in to_probe:
+        if sub not in alive_subs:
+            dead_subs.append(sub)
+
+    alive_cidrs = sorted(alive_subs)
+    if dead_subs:
+        # 合并回原 CIDR 显示
+        dead_origin = set()
+        for d in dead_subs:
+            origin = probe_map.get(d, d)
+            dead_origin.add(origin)
+        alive_origin = set()
+        for a in alive_cidrs:
+            origin = probe_map.get(a, a)
+            alive_origin.add(origin)
+
+        saved = len(dead_subs)
+        pct = saved / total_subs * 100
+        print(f"  存活: {len(alive_origin)} CIDR ({len(alive_cidrs)} 子段)  |  "
+              f"过滤死段: {saved} ({pct:.0f}%)")
+
+        if not alive_cidrs:
+            print(c("  [WARN] 所有子网均无响应 — 回退全量扫描", C.Y))
+            return v4_cidrs
+    else:
+        print(f"  存活: {len(alive_cidrs)} 子段 (全通)")
+
+    print(c(f"  本步耗时: {int(time.time() - step_start)}s", C.W))
+    return alive_cidrs
+
+
+def step_cert_enum(cfg: ScannerConfig) -> int:
+    """TLS 证书反查: 从 CF 节点提取 SAN，解析 IP 后合并入结果"""
+    step_start = time.time()
+    verified_file = BASE / "verified.txt"
+
+    if not verified_file.exists() or verified_file.stat().st_size == 0:
+        print("  无节点，跳过证书反查")
+        return 0
+
+    entries: list[list[str]] = []
+    header = ""
+    with open(verified_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("IP"):
+                header = line
+                continue
+            parts = line.split(",")
+            if len(parts) >= 9:
+                entries.append(parts)
+
+    if not entries:
+        print("  无有效节点，跳过")
+        return 0
+
+    print(f"  证书反查: {len(entries)} 个节点 (TLS SAN 提取)")
+
+    new_ips: dict[str, str] = {}  # ip -> source_ip
+
+    def _extract_san(ip: str, port: str) -> list[str]:
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((ip, int(port)), timeout=8) as sock:
+                with ctx.wrap_socket(sock, server_hostname=ip) as ssock:
+                    cert = ssock.getpeercert()
+                    sans = []
+                    for _, val in cert.get("subjectAltName", []):
+                        sans.append(val)
+                    return sans
+        except Exception:
+            return []
+
+    total = len(entries)
+    found = 0
+    with ThreadPoolExecutor(max_workers=min(total, cfg.api_concurrency)) as ex:
+        fmap = {}
+        for idx, parts in enumerate(entries):
+            fmap[ex.submit(_extract_san, parts[0], parts[1])] = idx
+
+        done = 0
+        for future in as_completed(fmap):
+            idx = fmap[future]
+            done += 1
+            if done % 10 == 0:
+                write_progress(done / total * 100, f" | 提取 {done}/{total}")
+            try:
+                sans = future.result()
+            except Exception:
+                continue
+            for san in sans:
+                try:
+                    resolved = socket.getaddrinfo(san, None, socket.AF_INET,
+                                                  socket.SOCK_STREAM)
+                    for _, _, _, _, sockaddr in resolved:
+                        ip_addr = sockaddr[0]
+                        if ip_addr not in new_ips and ip_addr != entries[idx][0]:
+                            new_ips[ip_addr] = entries[idx][0]
+                            found += 1
+                except (OSError, UnicodeError):
+                    continue
+
+    write_progress_done(f" | 新发现 IP: {found}")
+
+    if not new_ips:
+        print(c(f"  未发现新 IP (本步耗时: {int(time.time() - step_start)}s)", C.W))
+        return 0
+
+    print(f"  新发现 IP: {found} (来自 TLS SAN)")
+    print(f"  交叉验证中...")
+
+    cf_verified: list[list[str]] = []
+    with ThreadPoolExecutor(max_workers=min(len(new_ips), cfg.api_concurrency)) as ex:
+        vmap = {}
+        for ip, src in new_ips.items():
+            vmap[ex.submit(_verify_ip, ip)] = (ip, src)
+
+        for future in as_completed(vmap):
+            ip, src = vmap[future]
+            try:
+                result = future.result()
+                if result:
+                    cf_verified.append([ip, src, result.get("org", ""),
+                                        result.get("colo", ""),
+                                        result.get("country", ""),
+                                        result.get("city", "")])
+            except Exception:
+                pass
+
+    new_count = 0
+    if cf_verified:
+        with open(verified_file, "r") as f:
+            existing = f.read()
+
+        with open(verified_file, "w") as f:
+            f.write(existing.rstrip() + "\n")
+            for row in cf_verified:
+                ip, src, org, colo, country, city = row
+                # 复用源节点其他列 (端口 443, TLS TRUE)
+                line = f"{ip},443,TRUE,{colo},{country},{city},,,{org}"
+                f.write(line + "\n")
+                new_count += 1
+
+    print(c(f"  合并: +{new_count} 个新节点 (来源: TLS SAN 反查)", C.G))
+    print(c(f"  本步耗时: {int(time.time() - step_start)}s", C.W))
+    return new_count
+
+
+def _verify_ip(ip: str) -> Optional[dict]:
+    """调用 API 验证 IP 是否 CF 节点"""
+    try:
+        url = f"{API_URL}?ip={ip}"
+        req = urllib.request.Request(url, headers={"User-Agent": "ip-tidy/2.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            if data.get("cf", False) or data.get("colo"):
+                return {"org": data.get("org", ""), "colo": data.get("colo", ""),
+                        "country": data.get("country", ""), "city": data.get("city", "")}
+    except Exception:
+        pass
+    return None
 
 
 def _random_ports(n: int = 5) -> str:
@@ -209,22 +489,6 @@ try:
 except OSError:
     pass
 VERSION = _version
-
-
-@dataclass
-class ScannerConfig:
-    cpu: int = 1
-    ram_mb: int = 512
-    masscan_rate: int = 2000
-    cf_concurrency: int = 200
-    api_concurrency: int = 8
-    api_chunk: int = 2000
-    scan_ports: str = "443,8443,2053,2083,2087,2096"
-    global_ip: str = ""
-    global_country: str = ""
-    global_isp: str = ""
-    global_city: str = ""
-    ip_mode: str = "all"  # "v4" | "v6" | "all"
 
 
 def detect_hardware() -> tuple[int, int]:
@@ -1044,6 +1308,22 @@ def _cf_download(ip: str, port: str) -> float:
     return best
 
 
+def _smart_wrapper(cfg: ScannerConfig) -> tuple[list[str], list[str]]:
+    """子网分级探活，将结果写回 cidrs_v4.txt"""
+    v4_file = BASE / "cidrs_v4.txt"
+    if not v4_file.exists():
+        return [], []
+
+    v4_cidrs = [l.strip() for l in open(v4_file) if l.strip() and ":" not in l]
+    if not v4_cidrs:
+        return [], []
+
+    alive = step_smart_subnet(cfg, v4_cidrs)
+    v4_file.write_text("\n".join(alive) + "\n")
+    v6 = [l.strip() for l in open(BASE / "cidrs_v6.txt") if l.strip()] if (BASE / "cidrs_v6.txt").exists() else []
+    return alive, v6
+
+
 def output_csv(asns: list[str]) -> None:
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -1095,7 +1375,7 @@ def _parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]
             arg = raw_args[i]
             if arg in ("-p", "-r"):
                 i += 2
-            elif arg in ("-s", "-w", "-R", "-d", "--v4-only", "--v6-only"):
+            elif arg in ("-s", "-w", "-R", "-d", "--v4-only", "--v6-only", "--smart"):
                 i += 1
             else:
                 filtered.append(arg)
@@ -1173,6 +1453,8 @@ def main() -> None:
                         help="仅处理 IPv4 (过滤 IPv6 CIDR, masscan 正常扫描)")
     parser.add_argument("--v6-only", action="store_true",
                         help="仅处理 IPv6 (跳过 masscan, 导出 IPv6 CIDR 列表)")
+    parser.add_argument("--smart", action="store_true",
+                        help="智能子网分级: 大 CIDR 拆 /24 抽样探活, 仅扫活跃子网")
     a = parser.parse_args()
 
     if a.geo_update:
@@ -1275,6 +1557,7 @@ def main() -> None:
     print(c(f"  [已确认] 端口模式: {port_desc}", C.G))
 
     total_steps = 2 if a.skip_masscan else 3
+    total_steps += 1  # TLS 证书反查
     do_speed = a.speed
     do_deep = a.deep
     if not do_speed:
@@ -1297,11 +1580,17 @@ def main() -> None:
         total_steps += 1
     if do_deep:
         total_steps += 1
+    if a.smart:
+        total_steps += 1
 
     steps: list[tuple[str, Callable[[], object]]] = [
         ("Step 1  ASN -> CIDR", lambda: step_fetch_prefixes(cfg, asns, v4_cidrs, v6_cidrs)),
     ]
     step_num = 1
+    if a.smart:
+        step_num += 1
+        cfg.smart_mode = True
+        steps.append((f"Step {step_num}  子网分级探活", lambda: _smart_wrapper(cfg)))
     if a.skip_masscan or cfg.ip_mode == "v6":
         if cfg.ip_mode == "v6":
             print(c("  (v6-only: 跳过 masscan, masscan 仅支持 IPv4)", C.W))
@@ -1312,6 +1601,8 @@ def main() -> None:
         steps.append((f"Step {step_num}  Masscan 端口扫描", lambda: step_masscan(cfg)))
     step_num += 1
     steps.append((f"Step {step_num}  CF 检测 + API 精筛", lambda: _pipeline(cfg)))
+    step_num += 1
+    steps.append((f"Step {step_num}  TLS 证书反查", lambda: step_cert_enum(cfg)))
     if do_deep:
         step_num += 1
         steps.append((f"Step {step_num}  深度宽端口扫描", lambda: step_deep_scan(cfg)))
@@ -1369,10 +1660,20 @@ def main() -> None:
                 cidr_count = len(v4_list) + len(v6_list)
                 v4_cidr_count = len(v4_list)
                 v6_cidr_count = len(v6_list)
+            elif "子网分级" in label:
+                v4_list, v6_list = result
+                cidr_count = len(v4_list) + len(v6_list)
+                v4_cidr_count = len(v4_list)
+                v6_cidr_count = len(v6_list)
+                print(c(f"  存活子网: {len(v4_list)} 段 (v4)", C.G))
             elif label.startswith("Step 2") or ("Masscan" in label and "端口" in label):
                 total_open = result
             elif label.startswith("Step 3") or ("CF 检测" in label):
                 cf_nodes, passed_count = result
+            elif "证书反查" in label:
+                cert_new = result
+                if cert_new:
+                    passed_count += cert_new
         except Exception as e:
             print(c(f"  [FAIL] {e}", C.Y))
             sys.exit(1)
