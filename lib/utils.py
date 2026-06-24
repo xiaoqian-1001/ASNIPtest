@@ -121,9 +121,9 @@ def print_result_header(total_asn: int, total_cidr: int,
     cidr_info = str(total_cidr)
     if v4_cidr or v6_cidr:
         parts = []
-        if v4_cidr: parts.append(f"v4={v4_cidr}")
-        if v6_cidr: parts.append(f"v6={v6_cidr}")
-        cidr_info += f" ({', '.join(parts)})"
+        if v4_cidr: parts.append(f"IPV4={v4_cidr}")
+        if v6_cidr: parts.append(f"IPV6={v6_cidr}")
+        cidr_info += f" ({'/'.join(parts)})"
     print_sep("=", C.G)
     print(c("  [TASK COMPLETE]", C.LG))
     print(c(f"  ASN: {total_asn}  |  CIDR: {cidr_info}  |  "
