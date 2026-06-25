@@ -120,7 +120,7 @@ def print_result_header(total_asn: int, total_cidr: int,
     sep = c("=" * 60, C.G)
     cidr_info = str(total_cidr)
     if v4_cidr:
-        cidr_info += f" (v4={v4_cidr})"
+        cidr_info += f" (IPV4={v4_cidr})"
     print_sep("=", C.G)
     print(c("  [TASK COMPLETE]", C.LG))
     print(c(f"  ASN: {total_asn}  |  CIDR: {cidr_info}  |  "
