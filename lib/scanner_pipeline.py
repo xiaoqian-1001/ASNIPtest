@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .scanner_utils import (
     BASE, CF_SCANNER, VERIFY_PY, API_URL, WIDE_PORTS,
     _MASSCAN_BATCH,
-    split_v4_v6,
+    merge_cidrs,
     subnet_split, quick_probe, sample_ips,
     port_count, split_port_batches,
     masscan_adapter_ip, masscan_bin,
@@ -56,10 +56,8 @@ def ensure_cf_scanner() -> None:
 
 
 def resolve_asn_cidrs(asns: list[str], v4_cidrs: list[str],
-                      v6_cidrs: list[str],
-                      progress_callback: Optional[Callable] = None) -> tuple[list[str], list[str]]:
+                      progress_callback: Optional[Callable] = None) -> list[str]:
     all_v4 = list(v4_cidrs)
-    all_v6 = list(v6_cidrs)
     cache = _asn_cache_load()
     now_ts = time.time()
 
@@ -67,13 +65,12 @@ def resolve_asn_cidrs(asns: list[str], v4_cidrs: list[str],
         ck = f"AS{asn}"
         if ck in cache and now_ts - cache[ck].get("ts", 0) < _ASN_CACHE_TTL:
             entry = cache[ck]
-            if entry.get("v4_count", 0) == 0 and entry.get("v6_count", 0) == 0:
+            if entry.get("v4_count", 0) == 0:
                 cache.pop(ck, None)
             else:
                 all_v4.extend(entry.get("v4", []))
-                all_v6.extend(entry.get("v6", []))
                 if progress_callback:
-                    progress_callback("log", f"AS{asn} -> {entry.get('v4_count',0)}v4/{entry.get('v6_count',0)}v6 (缓存)")
+                    progress_callback("log", f"AS{asn} -> {entry.get('v4_count',0)}v4 (缓存)")
                 continue
 
         if progress_callback:
@@ -83,20 +80,16 @@ def resolve_asn_cidrs(asns: list[str], v4_cidrs: list[str],
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
-            pv4, pv6 = [], []
+            pv4 = []
             for p in data["data"]["prefixes"]:
                 prefix = p["prefix"]
-                if ":" in prefix:
-                    pv6.append(prefix)
-                    all_v6.append(prefix)
-                else:
+                if ":" not in prefix:
                     pv4.append(prefix)
                     all_v4.append(prefix)
-            if pv4 or pv6:
-                cache[ck] = {"ts": now_ts, "v4_count": len(pv4), "v6_count": len(pv6),
-                             "v4": pv4, "v6": pv6}
+            if pv4:
+                cache[ck] = {"ts": now_ts, "v4_count": len(pv4), "v4": pv4}
                 if progress_callback:
-                    progress_callback("log", f"AS{asn} -> {len(pv4)}v4/{len(pv6)}v6")
+                    progress_callback("log", f"AS{asn} -> {len(pv4)}v4")
             else:
                 if progress_callback:
                     progress_callback("log", f"AS{asn} -> API 返回空")
@@ -104,7 +97,6 @@ def resolve_asn_cidrs(asns: list[str], v4_cidrs: list[str],
             if ck in cache:
                 entry = cache[ck]
                 all_v4.extend(entry.get("v4", []))
-                all_v6.extend(entry.get("v6", []))
                 if progress_callback:
                     progress_callback("log", f"AS{asn} -> 使用上次缓存")
             else:
@@ -112,7 +104,7 @@ def resolve_asn_cidrs(asns: list[str], v4_cidrs: list[str],
                     progress_callback("log", f"AS{asn} -> 查询失败: {e}")
 
     _asn_cache_save(cache)
-    return split_v4_v6(all_v4 + all_v6)
+    return merge_cidrs(all_v4)
 
 
 def run_masscan(cidr_file: Path, ports_str: str, rate: int,

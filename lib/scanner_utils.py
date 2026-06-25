@@ -47,24 +47,20 @@ SUBNET_PORT = 443
 SUBNET_TIMEOUT = 3
 
 
-def split_v4_v6(cidrs: list[str]) -> tuple[list[str], list[str]]:
-    v4, v6 = [], []
+def merge_cidrs(cidrs: list[str]) -> list[str]:
+    nets = []
     for c in cidrs:
         try:
             net = ipaddress.ip_network(c, strict=False)
+            if net.version == 4:
+                nets.append(net)
         except ValueError:
             continue
-        if net.version == 4:
-            v4.append(net)
-        else:
-            v6.append(net)
-    def _merge(nets):
-        if not nets:
-            return []
-        collapsed = list(ipaddress.collapse_addresses(nets))
-        collapsed.sort(key=lambda n: (n.prefixlen, int(n.network_address)))
-        return [str(n) for n in collapsed]
-    return _merge(v4), _merge(v6)
+    if not nets:
+        return []
+    collapsed = list(ipaddress.collapse_addresses(nets))
+    collapsed.sort(key=lambda n: (n.prefixlen, int(n.network_address)))
+    return [str(n) for n in collapsed]
 
 
 def cidr_count(cidrs: list[str]) -> int:
@@ -564,14 +560,13 @@ def parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]
                 continue
             if arg in ("-p", "-r"):
                 skip_next = True
-            elif arg in ("-s", "-w", "-R", "-d", "--v4-only", "--v6-only", "--smart"):
+            elif arg in ("-s", "-w", "-R", "-d", "--smart"):
                 pass
             else:
                 filtered.append(arg)
         raw = ",".join(filtered)
     asns: list[str] = []
     v4_cidrs: list[str] = []
-    v6_cidrs: list[str] = []
     for item in raw.replace("，", ",").split(","):
         item = item.strip()
         if not item:
@@ -579,9 +574,7 @@ def parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]
         if "/" in item:
             try:
                 net = ipaddress.ip_network(item, strict=False)
-                if net.version == 6:
-                    v6_cidrs.append(str(net))
-                else:
+                if net.version == 4:
                     v4_cidrs.append(str(net))
             except ValueError:
                 pass
@@ -589,4 +582,4 @@ def parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]
             asn = item.replace("AS", "").replace("as", "")
             if asn.isdigit():
                 asns.append(asn)
-    return asns, v4_cidrs, v6_cidrs
+    return asns, v4_cidrs

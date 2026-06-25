@@ -2,7 +2,7 @@
 
 > **xiaoqian ASN NSD TOOL** -- ASN / CIDR -> Masscan -> TLS 检测 -> CF 节点 CSV
 
-支持 CLI 模式。一键输入 ASN 或 CIDR（支持 IPv4/IPv6），自动完成 IP 段解析、高速端口扫描、Cloudflare 反代节点检测，输出结构化 CSV。
+支持 CLI 模式。一键输入 ASN 或 CIDR，自动完成 IP 段解析、高速端口扫描、Cloudflare 反代节点检测，输出结构化 CSV。
 
 ![image](img/3094.png)
 
@@ -12,7 +12,6 @@
 
 | 特性 | 说明 |
 |------|------|
-| 双栈支持 | IPv4 / IPv6 CIDR 全链路解析、合并、去重、分离导出 |
 | 智能子网分级 | 大 CIDR 自动拆 /24 抽样探活，仅扫活跃子段 (`--smart`) |
 | 深度挖掘 | 通过节点 IP 提取 /16 CIDR 二次全流程扫描，自动扩充节点 |
 | 离线 GeoIP | 内置 MaxMind GeoLite2 数据库，无需网络查 ISP/地区/ASN |
@@ -41,7 +40,6 @@ ip-tidy AS209242                     # 单个 ASN
 ip-tidy AS209242,AS3214              # 多个 ASN (逗号)
 ip-tidy 1.2.3.0/24                   # 单个 IPv4 CIDR
 ip-tidy 1.2.3.0/24,5.6.7.0/24      # 多个 IPv4 CIDR
-ip-tidy 2001:db8::/32                # 单个 IPv6 CIDR
 ip-tidy AS209242,1.2.3.0/24         # ASN + CIDR 混合
 
 # 选项
@@ -52,8 +50,6 @@ ip-tidy AS209242 -d                  # 深度扫描 (命中 IP 追加宽端口)
 ip-tidy AS209242 -s                  # 扫描后自动测速
 ip-tidy AS209242 -r 4000             # 指定发包速率
 ip-tidy AS209242 -w -d -s            # 组合使用
-ip-tidy AS209242 --v4-only           # 仅处理 IPv4
-ip-tidy AS209242 --v6-only           # 仅处理 IPv6 (导出 CIDR 列表)
 ip-tidy AS209242 --smart             # 智能子网分级 (大 CIDR 自动探活)
 ip-tidy AS209242 -g                  # 下载离线 GeoIP 数据库
 
@@ -87,18 +83,6 @@ ip-tidy AS209242
 
 ---
 
-## IPv6 支持
-
-| 功能 | 说明 |
-|------|------|
-| CIDR 输入 | `2001:db8::/32` 自动识别 IPv6 |
-| ASN 前缀 | RIPEStat API 同步拉取 IPv6 前缀 |
-| 合并去重 | `ipaddress.collapse_addresses` 自动合并 |
-| 分离导出 | `--v4-only` / `--v6-only` 按协议族过滤 |
-| 导出格式 | `--v6-only` 导出 `output_v6_*.csv` CIDR 清单 |
-
-> masscan 仅支持 IPv4，`--v6-only` 模式自动跳过扫描阶段，直接导出前缀列表。
-
 ---
 
 ## 智能子网分级 (`--smart`)
@@ -120,9 +104,9 @@ ip-tidy 10.0.0.0/16 --smart
 
 ```mermaid
 graph LR
-    A["ASN / CIDR (v4+v6)"] --> B["RIPEStat API + 缓存<br/>IPv4/IPv6 前缀解析"]
+    A["ASN / CIDR"] --> B["RIPEStat API + 缓存<br/>IPv4 前缀解析"]
     B --> C["子网分级探活 (--smart)<br/>大段拆 /24 抽样"]
-    C --> D["masscan<br/>v4 CIDR SYN 扫描"]
+    C --> D["masscan<br/>IPv4 CIDR SYN 扫描"]
     D --> E["cf-scanner + API<br/>TLS 检测 + 精筛并行"]
     E --> F["深度挖掘 (可选)<br/>IP -> /16 CIDR 二次扫描"]
     F --> G["深度扫描 (可选)<br/>命中 IP 追加宽端口"]
@@ -132,7 +116,7 @@ graph LR
 
 | # | 步骤 | 说明 |
 |---|------|------|
-| 1 | ASN/CIDR -> 前缀 | RIPEStat API 拉取 IPv4/IPv6 前缀 (7天缓存)，CIDR 直通 |
+| 1 | ASN/CIDR -> 前缀 | RIPEStat API 拉取 IPv4 前缀 (7天缓存)，CIDR 直通 |
 | 2 | 子网分级 (可选) | 大 CIDR 拆 /24 抽样探活，仅保留活跃子网 (`--smart`) |
 | 3 | masscan | 自适应速率 SYN 扫描，XML 解析，仅保留 syn-ack |
 | 4 | CF 检测 + 精筛 | Go cf-scanner TLS 握手检测 + API 二次验证 |
@@ -203,7 +187,7 @@ http://1.2.3.4:8899/output_AS209242_20260623_120000.csv
 | 地区 | `HK` | 国家/地区 |
 | 城市 | `Hong Kong` | 城市 |
 | 网络延迟 | `42` | ms |
-| 协议 | `IPv4` | IPv4 或 IPv6 |
+| 协议 | `IPv4` | IPv4 |
 | ASN | `AS209242` | 来源 ASN |
 | ASN组织 | `Alibaba` | ASN 所属机构
 
@@ -290,7 +274,6 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：NAT 容器、OpenVZ/LXC (
 - GeoIP 状态栏显示，服务器硬件信息
 - RIPEStat ASN CIDR 解析 (7天缓存)
 - CSV 导出完整对齐 run.py 格式 (含协议列)
-- v6-only 模式导出 CIDR 清单
 
 ### v2.0.3
 - 修复 ASN 缓存空结果导致持续解析 0 CIDR
@@ -301,12 +284,7 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：NAT 容器、OpenVZ/LXC (
 - ScannerConfig 新增 smart_mode / ip_mode 字段
 
 ### v2.0.1
-- IPv6 CIDR 全链路: 解析/合并/去重/分离导出
-- `--v4-only` / `--v6-only` 协议族过滤开关
-- RIPEStat API 同步拉取 IPv6 前缀
 - 离线 GeoIP: 内置 MaxMind GeoLite2，`-g` 下载更新
-- CSV 新增协议列 (IPv4/IPv6)，v6-only 导出 CIDR 清单
-- install.sh 自动安装 maxminddb 依赖
 
 ### v2.0.0
 - 项目更名为 IP-Tidy (原 ASNIPtest)
