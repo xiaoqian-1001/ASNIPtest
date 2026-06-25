@@ -41,12 +41,7 @@ from lib.scanner_utils import (
     split_port_batches,
 )
 from lib.scanner_pipeline import (
-    resolve_asn_cidrs, run_masscan, run_cf_scanner, verify_batch,
-    smart_subnet_probe, ensure_cf_scanner,
-    enrich_geoip, geo_available as pipeline_geo_available,
-)
-from lib.scanner_pipeline import (
-    resolve_asn_cidrs, run_masscan, run_cf_scanner, verify_batch,
+    BASE, resolve_asn_cidrs, run_masscan, run_cf_scanner, verify_batch,
     smart_subnet_probe, ensure_cf_scanner,
     enrich_geoip, geo_available as pipeline_geo_available,
 )
@@ -105,7 +100,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str],
                         v4_cidrs: list[str]) -> list[str]:
     all_v4 = list(v4_cidrs)
     if v4_cidrs:
-        print(f"  直接 IPv4 CIDR: {len(v4_cidrs)} 个 ({', '.join(v4_cidrs[:5])}{'...' if len(v4_cidrs) > 5 else ''})")
+        print(f"  监测 IPv4 CIDR: {len(v4_cidrs)} 个 ({', '.join(v4_cidrs[:5])}{'...' if len(v4_cidrs) > 5 else ''})")
 
     def _cb(typ, data):
         if typ == "log":
