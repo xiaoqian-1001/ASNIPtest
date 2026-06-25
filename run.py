@@ -872,7 +872,8 @@ def main() -> None:
                             isp = gi["isp"]
                 except Exception:
                     pass
-                f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},,{asn},{proto}\n")
+                spd = parts[7] if len(parts) > 7 else ""
+                f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn},{proto}\n")
 
         print(c(f"  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
 
