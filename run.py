@@ -35,7 +35,7 @@ from lib.utils import (
 )
 from lib.geoip import lookup as geo_lookup, is_available as geo_available, geo_update_interactive
 from lib.scanner_utils import (
-    find_iface, probe_masscan_rate, tcp_latency, cf_download, test_one,
+    find_iface, probe_masscan_rate, detect_hardware, tcp_latency, cf_download, test_one,
     read_masscan_stderr,
     read_default_ports, parse_targets, expand_cidrs, port_count,
     split_port_batches,
