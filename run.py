@@ -268,37 +268,6 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
          "-c", str(cfg.cf_concurrency)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
-    verify_running = threading.Event()
-    cf_done = threading.Event()
-
-    def _bg_verify():
-        for _ in range(60):
-            try:
-                if hits_file.stat().st_size > 200:
-                    break
-            except OSError:
-                pass
-            if cf_done.is_set():
-                return
-            time.sleep(1)
-        verify_running.set()
-        try:
-            adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
-            subprocess.run([
-                sys.executable, str(VERIFY_PY),
-                "--input", str(hits_file),
-                "--output", str(verified_file),
-                "--api", API_URL,
-                "--chunk", str(cfg.api_chunk),
-                "--concurrent", str(adj_api),
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        except Exception:
-            pass
-        verify_running.clear()
-
-    vt = threading.Thread(target=_bg_verify, daemon=True)
-    vt.start()
-
     pat = re.compile(r"(\d+\.?\d*)%")
     last_pct = -1
     last_extra = ""
@@ -323,12 +292,10 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     write_progress_done(last_extra)
-    cf_done.set()
 
     with open(hits_file) as f:
         hits = sum(1 for _ in f)
 
-    vt.join(timeout=300)
     adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
     subprocess.run([
         sys.executable, str(VERIFY_PY),
