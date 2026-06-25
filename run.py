@@ -956,7 +956,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
         print("  " + "=" * 60)
         print("  Masscan 端口扫描")
         print("  " + "=" * 60)
-        masscan_hits = run_masscan(cidr_file, cfg.scan_ports, masscan_rate, progress_callback=None)
+        masscan_hits = run_masscan(cidr_file, cfg.scan_ports, masscan_rate, progress_callback=_cb)
     else:
         print("  Masscan 不可用，直接从 CIDR 扩展 IP 进行 cf-scanner 扫描...")
         port_list = [p.strip() for p in cfg.scan_ports.split(",") if p.strip().isdigit()]
