@@ -1,4 +1,4 @@
-# IP-Tidy v2.1.1
+# IP-Tidy v2.2
 
 > **xiaoqian ASN NSD TOOL** -- ASN / CIDR -> Masscan -> TLS 检测 -> CF 节点 CSV
 
@@ -262,6 +262,13 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：NAT 容器、OpenVZ/LXC (
 ---
 
 ## 更新日志
+
+### v2.2
+- 深度挖掘输出格式精简，匹配主流程样式
+- 全局 Masscan 首字母大写统一
+- Step 3 CF检测标签修正（API精筛→CF检测）
+- 进度条尾部多余.号去除
+- 深度挖掘交互优化，去除冗余日志
 
 ### v2.1.1
 - 深度挖掘: 通过节点 IP 提取 /16 CIDR 二次全流程扫描，自动扩充节点池
