@@ -109,7 +109,8 @@ def write_progress(pct: float, extra: str = "") -> None:
 def write_progress_done(extra: str = "") -> None:
     """完成进度条"""
     bar = c(_FILL * BAR_WIDTH, C.G)
-    sys.stderr.write(f"\r  [{bar}]  100.0%{extra}\n")
+    pct_s = "100.0%".rjust(6)
+    sys.stderr.write(f"\r  [{bar}] {pct_s}{extra}\n")
     sys.stderr.flush()
 
 

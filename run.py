@@ -301,6 +301,7 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
 
     pat = re.compile(r"(\d+\.?\d*)%")
     last_pct = -1
+    last_extra = ""
     t0 = time.time()
 
     for line in proc.stdout:
@@ -310,10 +311,10 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
             if abs(pct - last_pct) >= 0.5:
                 elapsed = time.time() - t0
                 eta = (elapsed / pct * (100 - pct)) if pct > 0 else 0
-                tag = " | 精筛并行" if verify_running.is_set() else ""
                 extra = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 0.5 else ""
                 stage_label = " | API精筛" if verify_running.is_set() else " | CF检测"
-                write_progress(pct, extra + stage_label)
+                last_extra = extra + stage_label
+                write_progress(pct, last_extra)
                 last_pct = pct
     proc.wait()
 
@@ -321,7 +322,7 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
         sys.stderr.write("\n"); sys.stderr.flush()
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
-    write_progress_done()
+    write_progress_done(last_extra)
     cf_done.set()
 
     with open(hits_file) as f:

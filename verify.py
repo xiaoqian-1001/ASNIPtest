@@ -126,11 +126,15 @@ def main() -> None:
             rate = done / elapsed if elapsed > 0 else 0
             eta_min = (total - done) / rate / 60 if rate > 0 else 0
             eta_m, eta_s = divmod(int(eta_min * 60), 60)
-            write_progress(done / total * 100,
-                           f" | 通过 {passed}/{total} | ETA {eta_m}分{eta_s}秒 | API精筛")
+            last_extra = f" | 通过 {passed}/{total} | ETA {eta_m}分{eta_s}秒 | API精筛"
+            write_progress(done / total * 100, last_extra)
 
     elapsed = int(time.time() - start)
-    write_progress_done(f" | 通过 {passed}/{total} | {elapsed // 60}分{elapsed % 60}秒 | API精筛")
+    ep = f"{elapsed // 60}分{elapsed % 60}秒"
+    done_extra = f" | 通过 {passed}/{total} | {ep} | API精筛"
+    if len(done_extra) < len(last_extra):
+        done_extra = done_extra + " " * (len(last_extra) - len(done_extra))
+    write_progress_done(done_extra)
 
 
 if __name__ == "__main__":
