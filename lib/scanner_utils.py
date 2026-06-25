@@ -436,7 +436,7 @@ def read_masscan_stderr(proc, prefix: str = "",
                 last_progress = time.time()
                 elapsed = last_progress - t0
                 if progress_callback:
-                    progress_callback(pct, prefix + extra)
+                    progress_callback(pct, "")
             idx += 1
         if not t.is_alive():
             break
