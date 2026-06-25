@@ -35,15 +35,15 @@ from lib.utils import (
 )
 from lib.geoip import lookup as geo_lookup, is_available as geo_available, geo_update_interactive
 from lib.scanner_utils import (
-    BASE, CF_SCANNER, VERIFY_PY, API_URL, WIDE_PORTS,
-    _MASSCAN_BATCH, _RANDOM_ZONES, _SPEED_TESTS,
-    split_v4_v6, cidr_count,
-    subnet_split, quick_probe, sample_ips,
-    random_ports, port_count, split_port_batches,
-    get_system_load, adjust_concurrency, detect_hardware,
     find_iface, probe_masscan_rate, tcp_latency, cf_download, test_one,
     read_masscan_stderr,
-    read_default_ports, parse_targets,
+    read_default_ports, parse_targets, expand_cidrs, port_count,
+    split_port_batches,
+)
+from lib.scanner_pipeline import (
+    resolve_asn_cidrs, run_masscan, run_cf_scanner, verify_batch,
+    smart_subnet_probe, ensure_cf_scanner,
+    enrich_geoip, geo_available as pipeline_geo_available,
 )
 from lib.scanner_pipeline import (
     resolve_asn_cidrs, run_masscan, run_cf_scanner, verify_batch,
@@ -861,6 +861,23 @@ def main() -> None:
             print(c(f"  [FAIL] {e}", C.Y))
             sys.exit(1)
 
+    deep_mine_count = 0
+    if passed_count > 0:
+        print(c(f"\n  [当前结果] 通过 {passed_count} 个节点", C.G))
+        try:
+            ch = input(c("  是否启用深度挖掘？(提取 IP -> /16 CIDR 二次扫描, y/n, 回车跳过): ", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ch = ""
+        if ch == "y":
+            print(c("  [已确认] 深度挖掘 (/16 扩展扫描)", C.G))
+            deep_mine_added = step_deep_mine(cfg, passed_count)
+            if deep_mine_added > 0:
+                passed_count += deep_mine_added
+                deep_mine_count = deep_mine_added
+            print_sep("-", C.W)
+        else:
+            print(c("  [已跳过] 深度挖掘", C.G))
+
     verified_file = BASE / "verified.txt"
     csv_path = None
     if verified_file.exists() and verified_file.stat().st_size > 0:
@@ -878,11 +895,33 @@ def main() -> None:
                     parsed.append(line)
 
         with open(csv_path, "w") as f:
-            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
+            f.write("IP地址,端口,TLS,数据中心,IP位置,地区,城市,网络延迟,协议,ASN,ASN组织\n")
             for p in parsed:
-                ip_part = p.split(",")[0]
-                proto = "IPv6" if ":" in ip_part else "IPv4"
-                f.write(p + f",{proto}\n")
+                parts = p.split(",")
+                ip = parts[0]
+                port = parts[1]
+                colo = parts[3]
+                country = parts[4]
+                region = parts[5]
+                latency = parts[6]
+                asn = parts[8]
+                proto = "IPv6" if ":" in ip else "IPv4"
+                city = region
+                isp = ""
+                loc = f"{city}, {country}" if city else country
+                try:
+                    gi = geo_lookup(ip)
+                    if gi:
+                        if gi.get("country") and not country:
+                            country = gi["country"]
+                        if gi.get("city"):
+                            city = gi["city"]
+                        if gi.get("isp"):
+                            isp = gi["isp"]
+                        loc = f"{city}, {country}" if city else country
+                except Exception:
+                    pass
+                f.write(f"{ip},{port},TRUE,{colo},{loc},{country},{city},{latency},{proto},{asn},{isp}\n")
 
         print(c(f"  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
 
@@ -916,6 +955,116 @@ def main() -> None:
 
     if csv_path and csv_path.exists():
         _serve_download(csv_path)
+
+
+def step_deep_mine(cfg: ScannerConfig, existing_count: int) -> int:
+    verified_file = BASE / "verified.txt"
+    if not verified_file.exists() or verified_file.stat().st_size == 0:
+        return 0
+
+    existing_ips: set[str] = set()
+    with open(verified_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("IP"):
+                continue
+            ip = line.split(",")[0]
+            if ":" not in ip:
+                existing_ips.add(ip)
+
+    if not existing_ips:
+        return 0
+
+    cidr_set: set[str] = set()
+    for ip in existing_ips:
+        try:
+            net = ipaddress.ip_network(ip, strict=False)
+            cidr_set.add(str(net.supernet(new_prefix=16)))
+        except ValueError:
+            pass
+
+    if not cidr_set:
+        return 0
+
+    cidrs = sorted(cidr_set)
+    total_possible = sum(ipaddress.ip_network(c).num_addresses for c in cidrs)
+    print(f"  深度挖掘: {len(existing_ips)} 节点 -> {len(cidrs)} 个 /16 CIDR ({total_possible:,} IP)")
+
+    existing_content = verified_file.read_text()
+    ensure_cf_scanner()
+
+    cidr_file = BASE / ".deep_mine_cidrs.txt"
+    cidr_file.write_text("\n".join(cidrs) + "\n")
+
+    step_start = time.time()
+    masscan_hits: list[str] = []
+
+    if os.path.exists("/usr/local/bin/masscan") or os.system("which masscan >/dev/null 2>&1") == 0:
+        masscan_rate = probe_masscan_rate()
+        batch_count = len(split_port_batches(cfg.scan_ports))
+        ports_display = cfg.scan_ports[:60]
+        print(f"  masscan 扫描 {len(cidrs)} CIDR ({port_count(cfg.scan_ports)} 端口, {masscan_rate} pps, {batch_count} 批)...")
+        masscan_hits = run_masscan(cidr_file, cfg.scan_ports, masscan_rate)
+    else:
+        print("  masscan 不可用，直接从 CIDR 扩展 IP 进行 cf-scanner 扫描...")
+        port_list = [p.strip() for p in cfg.scan_ports.split(",") if p.strip().isdigit()]
+        ips = expand_cidrs(cidrs, max_ips=5000)
+        for ip in ips:
+            for p in port_list[:3]:
+                masscan_hits.append(f"{ip}:{p}")
+
+    if not masscan_hits:
+        print(c("  深度挖掘: 未发现开放端口", C.Y))
+        cidr_file.unlink(missing_ok=True)
+        return 0
+
+    cf_in = BASE / ".deep_mine_cf_in.txt"
+    cf_out = BASE / ".deep_mine_cf_out.txt"
+    cf_in.write_text("\n".join(masscan_hits) + "\n")
+
+    adj_cf = adjust_concurrency(cfg.cf_concurrency, cfg.cpu)
+    print(f"  cf-scanner TLS 检测 ({len(masscan_hits)} 目标, 并发={adj_cf})...")
+    hit_count = run_cf_scanner(cf_in, cf_out, adj_cf)
+
+    if hit_count == 0:
+        print(c("  深度挖掘: 未检测到 CF 节点", C.Y))
+        for f in (cidr_file, cf_in, cf_out):
+            try: f.unlink()
+            except OSError: pass
+        return 0
+
+    print(f"  cf-scanner 命中 {hit_count} 个节点")
+
+    hits: list[str] = []
+    with open(cf_out) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if ":" not in line:
+                line = f"{line}:{cfg.scan_ports.split(',')[0].strip()}"
+            hits.append(line)
+
+    adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
+    new_results = verify_batch(hits, concurrency=adj_api)
+    if new_results:
+        enrich_geoip(new_results)
+
+    real_new = [r for r in new_results if r["ip"] not in existing_ips]
+
+    if real_new:
+        with open(verified_file, "a") as f:
+            for r in real_new:
+                f.write(f"{r['ip']},{r.get('port','443')},TRUE,{r.get('colo','')},"
+                        f"{r.get('country','')},{r.get('region','')},,,AS{r.get('asn','')}\n")
+
+    for f in (cidr_file, cf_in, cf_out):
+        try: f.unlink()
+        except OSError: pass
+
+    print(c(f"  深度挖掘: +{len(real_new)} 个新节点", C.G))
+    print(c(f"  本步耗时: {int(time.time() - step_start)}s", C.W))
+    return len(real_new)
 
 
 def _serve_download(file_path: Path) -> None:
