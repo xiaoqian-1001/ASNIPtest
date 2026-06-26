@@ -49,13 +49,25 @@ def _check_one(ip_port: str, api_url: str) -> Optional[str]:
             return None
 
         pr = data.get("probe_results") or {}
-        ei = (pr.get("ipv4") or {}).get("exit") or (pr.get("ipv6") or {}).get("exit") or {}
+        probe = pr.get("ipv4") or pr.get("ipv6") or {}
+        ei = probe.get("exit") or {}
         colo = ei.get("colo", data.get("colo", ""))
         country = ei.get("country", "")
         region = ei.get("region", "")
         asn = ei.get("asn", data.get("asn", ""))
+
+        api_latency = ""
+        try:
+            cm = probe.get("connect_ms")
+            tm = probe.get("tls_ms")
+            hm = probe.get("http_ms")
+            if cm is not None and tm is not None and hm is not None:
+                api_latency = int(cm) + int(tm) + int(hm)
+        except (TypeError, ValueError):
+            api_latency = data.get("responseTime", "")
+
         ip, port = ip_port.rsplit(":", 1)
-        return f"{ip},{port},TRUE,{colo},{country},{region},,,AS{asn}"
+        return f"{ip},{port},TRUE,{colo},{country},{region},{api_latency},,AS{asn}"
     return None
 
 
