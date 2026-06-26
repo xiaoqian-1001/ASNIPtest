@@ -256,6 +256,7 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
 
     ensure_cf_scanner()
     hits_file.write_text("")
+    verified_file.write_text("")
 
     adj = adjust_concurrency(cfg.cf_concurrency, cfg.cpu)
     if adj != cfg.cf_concurrency:
@@ -266,60 +267,6 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
         [str(CF_SCANNER), "-i", str(input_file), "-o", str(hits_file),
          "-c", str(cfg.cf_concurrency)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-
-    last_verified_line = 0
-    verify_done = threading.Event()
-
-    def _bg_verify():
-        nonlocal last_verified_line
-        adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
-        existing: set[str] = set()
-        if verified_file.exists():
-            with open(verified_file) as vf:
-                for vline in vf:
-                    parts = vline.strip().split(",", 2)
-                    if len(parts) >= 2:
-                        existing.add(f"{parts[0]}:{parts[1]}")
-        while not verify_done.is_set():
-            try:
-                try:
-                    if hits_file.stat().st_size == 0:
-                        time.sleep(1)
-                        continue
-                except OSError:
-                    time.sleep(1)
-                    continue
-                with open(hits_file) as f:
-                    lines = f.readlines()
-                current = len(lines)
-                if current <= last_verified_line:
-                    time.sleep(0.5)
-                    continue
-                batch = []
-                for b in lines[last_verified_line:]:
-                    entry = b.strip().split()[0] if b.strip() else ""
-                    if entry and entry not in existing:
-                        batch.append(b)
-                last_verified_line = current
-                if not batch:
-                    continue
-                batch_file = BASE / f".pipe_batch_{int(time.time())}.txt"
-                batch_file.write_text("".join(batch))
-                subprocess.run([
-                    sys.executable, str(VERIFY_PY),
-                    "--input", str(batch_file),
-                    "--output", str(verified_file),
-                    "--api", API_URL,
-                    "--chunk", str(cfg.api_chunk),
-                    "--concurrent", str(adj_api),
-                    "--append",
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                batch_file.unlink(missing_ok=True)
-            except Exception:
-                time.sleep(2)
-
-    vt = threading.Thread(target=_bg_verify, daemon=True)
-    vt.start()
 
     pat = re.compile(r"(\d+\.?\d*)%")
     last_pct = -1
@@ -334,7 +281,7 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
                 elapsed = time.time() - t0
                 eta = (elapsed / pct * (100 - pct)) if pct > 0 else 0
                 extra = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 0.5 else ""
-                stage_label = " | CF检测(流水线)"
+                stage_label = " | CF检测"
                 last_extra = extra + stage_label
                 write_progress(pct, last_extra)
                 last_pct = pct
@@ -349,39 +296,15 @@ def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
     with open(hits_file) as f:
         hits = sum(1 for _ in f)
 
-    verify_done.set()
-    vt.join(timeout=600)
-
-    with open(hits_file) as f:
-        remaining = f.readlines()[last_verified_line:]
-    remaining = [r for r in remaining if r.strip()]
-    if remaining:
-        final_bound = set()
-        if verified_file.exists():
-            with open(verified_file) as vf:
-                for vline in vf:
-                    parts = vline.strip().split(",", 2)
-                    if len(parts) >= 2:
-                        final_bound.add(f"{parts[0]}:{parts[1]}")
-        filtered = []
-        for r in remaining:
-            entry = r.strip().split()[0] if r.strip() else ""
-            if entry and entry not in final_bound:
-                filtered.append(r)
-        if filtered:
-            final_file = BASE / ".pipe_final.txt"
-            final_file.write_text("".join(filtered))
-            adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
-            subprocess.run([
-                sys.executable, str(VERIFY_PY),
-                "--input", str(final_file),
-                "--output", str(verified_file),
-                "--api", API_URL,
-                "--chunk", str(cfg.api_chunk),
-                "--concurrent", str(adj_api),
-                "--append",
-            ], check=True)
-            final_file.unlink(missing_ok=True)
+    adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
+    subprocess.run([
+        sys.executable, str(VERIFY_PY),
+        "--input", str(hits_file),
+        "--output", str(verified_file),
+        "--api", API_URL,
+        "--chunk", str(cfg.api_chunk),
+        "--concurrent", str(adj_api),
+    ], check=True)
 
     with open(verified_file) as f:
         passed = sum(1 for _ in f) - 1
@@ -813,7 +736,7 @@ def main() -> None:
         steps.append((f"Step {step_num}  延迟 + 带宽测速", lambda: step_speed_test(cfg)))
 
     for stale in ("cidrs.txt", "cidrs_v4.txt",
-                  "masscan_result.xml", "cf_hits.txt"):
+                  "masscan_result.xml", "cf_hits.txt", "verified.txt"):
         p = BASE / stale
         try:
             if p.exists():
@@ -835,11 +758,6 @@ def main() -> None:
         try:
             if p.exists():
                 p.unlink()
-        except OSError:
-            pass
-    for p in BASE.glob(".pipe_*.txt"):
-        try:
-            p.unlink()
         except OSError:
             pass
     if not a.skip_masscan:
