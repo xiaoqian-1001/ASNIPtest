@@ -117,7 +117,7 @@ def step_fetch_prefixes(cfg: ScannerConfig, asns: list[str],
     print(f"  -> 合并: IPv4 共计 {len(final_v4)} 段 -> {v4_ip_count:,} IP")
 
     if not final_v4:
-        print(c("  [FAIL] 无可用 CIDR，请检查输入是否正确", C.Y))
+        print(c("  [FAIL] 无可用 CIDR，请检查输入是否正确", C.LR))
         sys.exit(1)
     return final_v4
 
@@ -129,7 +129,7 @@ def step_masscan(cfg: ScannerConfig) -> int:
     if not ip_file.exists() or ip_file.stat().st_size == 0:
         ip_file = BASE / "cidrs.txt"
         if not ip_file.exists() or ip_file.stat().st_size == 0:
-            print(c("  [FAIL] 无 IPv4 CIDR，跳过 Masscan", C.Y))
+            print(c("  [FAIL] 无 IPv4 CIDR，跳过 Masscan", C.LR))
             return 0
 
     if ip_file.name == "cidrs.txt":
@@ -140,7 +140,7 @@ def step_masscan(cfg: ScannerConfig) -> int:
                 if line and ":" not in line:
                     v4_only.append(line)
         if not v4_only:
-            print(c("  [FAIL] cidrs.txt 无 IPv4，跳过 Masscan", C.Y))
+            print(c("  [FAIL] cidrs.txt 无 IPv4，跳过 Masscan", C.LR))
             return 0
         tmp_v4 = BASE / "cidrs_v4.txt"
         tmp_v4.write_text("\n".join(v4_only) + "\n")
@@ -185,18 +185,18 @@ def step_masscan(cfg: ScannerConfig) -> int:
             sys.stderr.flush()
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "init: failed" in err:
-                print(c("  [FAIL] Masscan 需要 raw socket 权限", C.Y))
+                print(c("  [FAIL] Masscan 需要 raw socket 权限", C.LR))
                 if os.geteuid() != 0:
                     print("  解决: sudo python3 run.py ...  (以 root 运行)")
                     print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
             elif "password is required" in err or "a password is required" in err:
-                print(c("  [FAIL] sudo 需要密码交互，当前环境无法输入", C.Y))
+                print(c("  [FAIL] sudo 需要密码交互，当前环境无法输入", C.LR))
                 print("  解决: sudo python3 run.py ...  (以 root 运行)")
                 print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
             else:
                 sys.stderr.write("".join(stderr_lines))
                 sys.stderr.flush()
-                print(c(f"\n  [FAIL] Masscan 返回码 {proc.returncode}", C.Y))
+                print(c(f"\n  [FAIL] Masscan 返回码 {proc.returncode}", C.LR))
             raise subprocess.CalledProcessError(proc.returncode, cmd)
 
         write_progress_done(prefix)
@@ -241,9 +241,9 @@ def step_masscan(cfg: ScannerConfig) -> int:
     print(f"  开放端口: {len(all_open)}（Syn-Ack确认）")
     step_s = int(time.time() - step_start)
     m, s = divmod(step_s, 60)
-    print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {step_s}秒", C.W))
-    return len(all_open)
+    print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {step_s}秒", C.GY))
 
+    return len(all_open)
 
 def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
     step_start = time.time()
@@ -393,7 +393,7 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
             sys.stderr.write("\n"); sys.stderr.flush()
             err = "".join(stderr_lines).lower()
             if "permission denied" in err or "password is required" in err:
-                print(c("  [FAIL] masscan 权限不足", C.Y))
+                print(c("  [FAIL] masscan 权限不足", C.LR))
             raise subprocess.CalledProcessError(proc.returncode, cmd)
 
         write_progress_done(prefix)
@@ -446,13 +446,13 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
 
     result_file = BASE / "masscan_result.txt"
     result_file.write_text("\n".join(all_open) + "\n")
-    print(c(f"  深度 Masscan 完成: {len(all_open)} 开放端口", C.LB))
+    print(c(f"  深度 Masscan 完成: {len(all_open)} 开放端口", C.CY))
 
     if not all_open:
         print("  无新增开放端口")
         return len(saved)
 
-    print(c("  CF 检测中...", C.W))
+    print(c("  CF 检测中...", C.CY))
     hits, _passed = _pipeline(cfg)
 
     new_set: dict[str, str] = {}
@@ -531,7 +531,7 @@ def step_speed_test(cfg: ScannerConfig) -> None:
     write_progress_done(f" | 测速完成: {total} 个 IP")
     elapsed = int(time.time() - step_start)
     m, s = divmod(elapsed, 60)
-    print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {s}秒", C.W))
+    print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {s}秒", C.GY))
 
 
 def _smart_wrapper(cfg: ScannerConfig) -> list[str]:
@@ -629,7 +629,7 @@ def main() -> None:
     if a.ports:
         cfg.scan_ports = parse_ports(a.ports)
         if not cfg.scan_ports:
-            print(c(f"  [FAIL] 无效端口: {a.ports}", C.Y))
+            print(c(f"  [FAIL] 无效端口: {a.ports}", C.LR))
             sys.exit(1)
         print(f"  自定义端口: {cfg.scan_ports}")
     elif a.wide:
@@ -665,7 +665,7 @@ def main() -> None:
             cfg.scan_ports = cp
 
     port_desc = f"端口 ({port_count(cfg.scan_ports)} 个)"
-    print(c(f"  [已确认] 端口模式: {port_desc}", C.G))
+    print(c(f"  [已确认] 端口模式: {port_desc}", C.LG))
 
     if not a.smart and v4_cidrs:
         has_large = any(
@@ -798,7 +798,7 @@ def main() -> None:
                     passed_count += added
                     deep_mine_count = added
         except Exception as e:
-            print(c(f"  [FAIL] {e}", C.Y))
+            print(c(f"  [FAIL] {e}", C.LR))
             sys.exit(1)
 
     verified_file = BASE / "verified.txt"
@@ -888,10 +888,10 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     except (EOFError, KeyboardInterrupt):
         ch = ""
     if ch != "y":
-        print(c("  [已跳过] 深度挖掘", C.G))
+        print(c("  [已跳过] 深度挖掘", C.LG))
         return 0
 
-    print(c("  [已确认] 深度挖掘", C.G))
+    print(c("  [已确认] 深度挖掘", C.LG))
 
     prefix = 16
     try:
@@ -952,20 +952,20 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
             sys.stderr.flush()
             print(f"  {msg}")
         elif typ == "error":
-            print(c(f"  [FAIL] {data}", C.Y))
+            print(c(f"  [FAIL] {data}", C.LR))
 
     masscan_hits: list[str] = []
 
     if os.path.exists("/usr/local/bin/masscan") or os.system("which masscan >/dev/null 2>&1") == 0:
         masscan_rate = probe_masscan_rate(quiet=True)
-        print("  " + "=" * 60)
-        print("  基于 Masscan 执行端口扫描任务")
-        print("  " + "=" * 60)
+        print(c("  ─" * 30, C.B))
+        print(c("  基于 Masscan 执行端口扫描任务", C.LC))
+        print(c("  ─" * 30, C.B))
         ms_start = time.time()
         masscan_hits = run_masscan(cidr_file, cfg.scan_ports, masscan_rate, progress_callback=_cb)
         ms_elapsed = int(time.time() - ms_start)
         ms_m, ms_s = divmod(ms_elapsed, 60)
-        print(c(f"  本步耗时: {ms_m}分{ms_s}秒" if ms_m else f"  本步耗时: {ms_s}秒", C.W))
+        print(c(f"  本步耗时: {ms_m}分{ms_s}秒" if ms_m else f"  本步耗时: {ms_s}秒", C.GY))
     else:
         print("  Masscan 不可用，直接从 CIDR 扩展 IP 进行 cf-scanner 扫描...")
         port_list = [p.strip() for p in cfg.scan_ports.split(",") if p.strip().isdigit()]
@@ -976,7 +976,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
 
     if not masscan_hits:
         write_progress_done(" | 无开放端口")
-        print(c("  深度挖掘: 未发现开放端口", C.Y))
+        print(c("  深度挖掘: 未发现开放端口", C.LY))
         cidr_file.unlink(missing_ok=True)
         return 0
 
@@ -985,14 +985,14 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     cf_in.write_text("\n".join(masscan_hits) + "\n")
 
     adj_cf = adjust_concurrency(cfg.cf_concurrency, cfg.cpu)
-    print("  " + "=" * 60)
-    print("  Cloudflare IP 检测与 API 精准过滤")
-    print("  " + "=" * 60)
+    print(c("  ─" * 30, C.B))
+    print(c("  Cloudflare IP 检测与 API 精准过滤", C.LC))
+    print(c("  ─" * 30, C.B))
     hit_count = run_cf_scanner(cf_in, cf_out, adj_cf, progress_callback=_cb)
 
     if hit_count == 0:
         write_progress_done(" | CF 未命中")
-        print(c("  深度挖掘: CF 未命中", C.Y))
+        print(c("  深度挖掘: CF 未命中", C.LY))
         for f in (cidr_file, cf_in, cf_out):
             try: f.unlink()
             except OSError: pass
@@ -1033,8 +1033,8 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     ep = f"{m}分{s}秒" if m else f"{elapsed}秒"
     done_extra = f" | 通过 {len(new_results)}/{hit_count} | {ep} | API精筛"
     write_progress_done(done_extra)
-    print(c(f"  CF可用IP数量: {hit_count}  |  精筛通过率: {rate:.0f}% ({len(new_results)}/{hit_count})  |  深度挖掘: +{len(real_new)} 新 IP", C.G))
-    print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {elapsed}秒", C.W))
+    print(c(f"  CF可用IP数量: {hit_count}  |  精筛通过率: {rate:.0f}% ({len(new_results)}/{hit_count})  |  深度挖掘: +{len(real_new)} 新 IP", C.W))
+    print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {elapsed}秒", C.GY))
     return len(real_new)
 
 
@@ -1043,25 +1043,25 @@ def _serve_download(file_path: Path) -> None:
     port = 8899
 
     if not port_is_free(port):
-        print(c(f"  端口 {port} 被占用，尝试释放...", C.Y))
+        print(c(f"  端口 {port} 被占用，尝试释放...", C.LY))
         if kill_port_process(port) and port_is_free(port):
-            print(c(f"  已释放端口 {port}", C.G))
+            print(c(f"  已释放端口 {port}", C.LG))
         else:
             while not port_is_free(port) and port < 9900:
                 port += 1
             if port >= 9900:
-                print(c("  无可用端口，跳过下载服务", C.Y))
-                print(c(f"  [CSV] {file_path}", C.LB))
+                print(c("  无可用端口，跳过下载服务", C.LY))
+                print(c(f"  [CSV] {file_path}", C.W))
                 return
 
     server: Optional[subprocess.Popen] = None
     try:
-        print_sep("=", C.LB)
+        print_sep("─", C.B)
         print(c("  下载服务已启动 (按回车关闭)", C.LG))
-        print(c(f"  http://{lan_ip}:{port}/{file_path.name}", C.LB))
+        print(c(f"  http://{lan_ip}:{port}/{file_path.name}", C.W))
         pub = get_public_ip()
         if pub not in ("127.0.0.1", lan_ip):
-            print(c(f"  http://{pub}:{port}/{file_path.name}", C.LB))
+            print(c(f"  http://{pub}:{port}/{file_path.name}", C.W))
         print()
         server = subprocess.Popen(
             [sys.executable, "-m", "http.server", str(port),
@@ -1069,7 +1069,7 @@ def _serve_download(file_path: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if sys.stdin.isatty():
             import time as _time
-            print(c("  (请在浏览器中下载文件后按回车关闭服务)", C.LB))
+            print(c("  (请在浏览器中下载文件后按回车关闭服务)", C.CY))
             try:
                 input()
             except (EOFError, KeyboardInterrupt):

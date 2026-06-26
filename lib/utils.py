@@ -32,11 +32,17 @@ _EMPTY = "-"
 
 class C:
     R  = "\033[0m"       # reset
-    G  = "\033[32m"      # green
-    LG = "\033[1;32m"    # light green
-    W  = "\033[1;37m"    # white
-    Y  = "\033[33m"      # yellow
-    LB = "\033[1;36m"    # light blue
+    G  = "\033[32m"      # green (细)
+    LG = "\033[1;32m"    # bold green
+    W  = "\033[1;37m"    # bold white
+    Y  = "\033[33m"      # yellow (细)
+    LY = "\033[1;33m"    # bold yellow ─ warning
+    LB = "\033[1;36m"    # bold cyan
+    B  = "\033[34m"      # blue (细) ─ separator
+    LR = "\033[1;31m"    # bold red ─ error
+    LC = "\033[1;36m"    # bold cyan ─ step / title
+    CY = "\033[36m"      # cyan (细) ─ info
+    GY = "\033[90m"      # grey (细) ─ minor info
 
 
 def c(text: str, color: str) -> str:
@@ -56,26 +62,27 @@ def print_banner(cpu: int = 0, mem: str = "", rate: int = 0,
         ver = vp.read_text().strip() if vp.is_file() else ""
     except OSError:
         ver = ""
-    w = 60
-    sep = "=" * w
+    BW = 68
+    line = "─" * BW
     print()
-    print(c(sep, C.LB))
-    tag = f"  {ver}" if ver else ""
-    print(c(f"  LITTLE MONEY ASN NSD TOOL{tag}", C.LG))
-    print(c("  ASN -> CIDR -> Masscan -> CF -> CSV", C.W))
-    print(c(sep, C.LB))
+    print(c(f"┌{line}┐", C.B))
+    print(c(f"│{'':{BW}}│", C.B))
+    print(c(f"│  LITTLE MONEY ASN NSD TOOL{'':>{BW - 30 - len(ver)}}{ver}│", C.LC))
+    print(c(f"│  ASN → CIDR → Masscan → TLS → CF CSV{'':>{BW - 38}}│", C.W))
+    print(c(f"│{'':{BW}}│", C.B))
+    print(c(f"└{line}┘", C.B))
 
 
 def print_step(label: str) -> None:
     """打印步骤标题"""
-    sep = c("=" * 60, C.LB)
-    title = c(f"  {label}", C.LG)
+    sep = c("─" * 60, C.B)
+    title = c(f"  {label}", C.LC)
     print(sep)
     print(title)
     print(sep)
 
 
-def print_sep(char: str = "-", color: str = C.W, width: int = 60) -> None:
+def print_sep(char: str = "─", color: str = C.B, width: int = 60) -> None:
     """打印分隔符"""
     print(c(char * width, color))
 
@@ -87,14 +94,14 @@ def print_hardware_info(cpu: int, mem_mb: int, rate: int,
     mem_str = f"{mem_mb}MB" if mem_mb < 1024 else f"{mem_mb / 1024:.1f}GB"
     hw = (f"  [硬件]  CPU {cpu} 核  |  可用内存 {mem_str}  |  "
           f"Masscan {rate} pps")
-    print(c(hw, C.W))
+    print(c(hw, C.GY))
     cfg = (f"  [并发]  CF 检测 {cf_concurrency}c  |  "
            f"API 查询 {api_concurrency}c")
-    print(c(cfg, C.W))
+    print(c(cfg, C.GY))
     if org:
         loc = city if city else ""
-        print(c(f"  [环境]  {loc}  |  {org}", C.W))
-    print_sep("=", C.LB)
+        print(c(f"  [环境]  {loc}  |  {org}", C.GY))
+    print_sep("─", C.B)
 
 
 def write_progress(pct: float, extra: str = "") -> None:
@@ -129,22 +136,21 @@ def print_result_header(total_asn: int, total_cidr: int,
                         total_open: int, cf_nodes: int, passed: int,
                         v4_cidr: int = 0) -> None:
     """打印结果摘要头部"""
-    sep = c("=" * 60, C.G)
     cidr_info = str(total_cidr)
     if v4_cidr:
         cidr_info += f" (IPV4={v4_cidr})"
-    print_sep("=", C.G)
+    print_sep("─", C.B)
     print(c("  [TASK COMPLETE]", C.LG))
     print(c(f"  ASN: {total_asn}  |  CIDR: {cidr_info}  |  "
             f"Open Ports: {total_open}  |  CF Nodes: {cf_nodes}  |  "
             f"Passed: {passed}", C.W))
-    print_sep("=", C.G)
+    print_sep("─", C.B)
 
 
 def print_total_time(elapsed: float) -> None:
     """打印总耗时"""
     m, s = divmod(int(elapsed), 60)
-    print(c(f"  总耗时: {m}分{s}秒", C.W))
+    print(c(f"  总耗时: {m}分{s}秒", C.GY))
 
 
 # ── 公网 IP 获取（并发 HTTP + DNS 兜底） ──
