@@ -1068,12 +1068,12 @@ def _serve_download(file_path: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if sys.stdin.isatty():
             import time as _time
-            print(c("  (请在浏览器中下载文件后按回车关闭服务)", C.CY))
+            print(c("  (请在浏览器中下载文件后按 Ctrl+C 关闭服务)", C.CY))
             try:
-                input()
-            except (EOFError, KeyboardInterrupt):
+                while True:
+                    _time.sleep(1)
+            except (KeyboardInterrupt, EOFError):
                 pass
-            _time.sleep(1.5)
         else:
             print(c("  (非交互终端，按 Ctrl+C 停止服务)", C.W))
             try:
