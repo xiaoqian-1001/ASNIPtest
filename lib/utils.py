@@ -102,7 +102,12 @@ def write_progress(pct: float, extra: str = "") -> None:
     filled = int(pct / 100 * BAR_WIDTH)
     bar = c(_FILL * filled, C.G) + c(_EMPTY * (BAR_WIDTH - filled), C.W)
     pct_s = f"{pct:5.1f}%".rjust(6)
-    sys.stderr.write(f"\r  [{bar}] {pct_s}{extra}")
+    line = f"\r  [{bar}] {pct_s}{extra}"
+    sys.stderr.write(line)
+    # Pad to 80 cols to erase leftover chars from previous longer line
+    visible = re.sub(r'\x1b\[[0-9;]*m', '', line)
+    pad = max(0, 80 - len(visible))
+    sys.stderr.write(" " * pad)
     sys.stderr.flush()
 
 
