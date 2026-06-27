@@ -116,6 +116,35 @@ def random_ports(n: int = 5) -> str:
     return ",".join(result)
 
 
+def random_probe_ports(n: int, existing_ports: str) -> str:
+    existing: set[int] = set()
+    for part in existing_ports.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                a, b = part.split("-", 1)
+                for p in range(int(a), int(b) + 1):
+                    existing.add(p)
+            except ValueError:
+                pass
+        elif part.isdigit():
+            existing.add(int(part))
+    result: list[str] = []
+    attempts = 0
+    hi_ranges = [(10000, 19999), (20000, 60000), (60001, 65535)]
+    while len(result) < n and attempts < n * 20:
+        lo, hi = hi_ranges[attempts % 3]
+        port = random.randint(lo, hi)
+        if port not in existing:
+            existing.add(port)
+            result.append(str(port))
+        attempts += 1
+    random.shuffle(result)
+    return ",".join(result)
+
+
 def port_count(port_str: str) -> int:
     total = 0
     for part in port_str.split(","):

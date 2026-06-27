@@ -38,7 +38,7 @@ from lib.scanner_utils import (
     find_iface, probe_masscan_rate, detect_hardware, tcp_latency, cf_download, test_one,
     read_masscan_stderr,
     read_default_ports, parse_targets, expand_cidrs, port_count,
-    split_port_batches, adjust_concurrency, random_ports,
+    split_port_batches, adjust_concurrency, random_ports, random_probe_ports,
     WIDE_PORTS, cidr_count,
     CF_SCANNER, VERIFY_PY, API_URL, _MASSCAN_BATCH,
 )
@@ -578,6 +578,8 @@ def main() -> None:
                         help="宽端口模式")
     parser.add_argument("-R", "--random", action="store_true",
                         help="随机 5 端口快速探测")
+    parser.add_argument("-P", "--probe-ports", metavar="N", type=int,
+                        help="在常规端口基础上追加 N 个随机高端口探活 (10000-65535)")
     parser.add_argument("-r", "--rate", metavar="PPS", type=int,
                         help="Masscan 发包速率 (默认自动探测)")
     parser.add_argument("--skip-masscan", action="store_true",
@@ -646,11 +648,11 @@ def main() -> None:
             inp = input(c("  端口模式 (回车=默认 / w=宽端口 / r=随机5 / 自定义): ", C.Y)).strip().lower()
         except (EOFError, KeyboardInterrupt):
             inp = ""
-        if inp.lower() == "w":
+        if inp == "w":
             cfg.scan_ports = WIDE_PORTS
             cfg.masscan_rate = max(500, cfg.masscan_rate // 2)
             print(f"  宽端口模式: {port_count(cfg.scan_ports)} 端口 ({cfg.masscan_rate} pps)")
-        elif inp.lower() == "r":
+        elif inp == "r":
             cfg.scan_ports = random_ports()
             print(f"  随机端口: {cfg.scan_ports}")
         elif inp:
@@ -658,6 +660,17 @@ def main() -> None:
             if parsed:
                 cfg.scan_ports = parsed
                 print(f"  扫描端口: {cfg.scan_ports}")
+        else:
+            try:
+                probe = input(c("  追加高端口探活? (数量/回车跳过, 1-100): ", C.Y)).strip()
+            except (EOFError, KeyboardInterrupt):
+                probe = ""
+            if probe.isdigit():
+                n = max(1, min(int(probe), 100))
+                extra = random_probe_ports(n, cfg.scan_ports)
+                if extra:
+                    cfg.scan_ports = cfg.scan_ports + "," + extra
+                    print(f"  默认端口 +{n} 高端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})")
     else:
         cp = _parse_custom_port(sys.argv[1:])
         if cp:
@@ -665,6 +678,15 @@ def main() -> None:
 
     port_desc = f"端口 ({port_count(cfg.scan_ports)} 个)"
     print(c(f"  [已确认] 端口模式: {port_desc}", C.LG))
+
+    if a.probe_ports:
+        n = max(1, min(a.probe_ports, 100))
+        extra = random_probe_ports(n, cfg.scan_ports)
+        if extra:
+            cfg.scan_ports = cfg.scan_ports + "," + extra
+            print(c(f"  随机探口: +{n} 个高端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})", C.CY))
+        else:
+            print(c(f"  随机探口: 无新端口可追加", C.Y))
 
     if not a.smart and v4_cidrs:
         has_large = any(
