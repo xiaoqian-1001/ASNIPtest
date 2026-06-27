@@ -559,6 +559,66 @@ def _parse_custom_port(args: list[str]) -> Optional[str]:
     return None
 
 
+def _print_visualization(csv_path: Path) -> None:
+    entries: list[str] = []
+    with open(csv_path) as f:
+        next(f)
+        for line in f:
+            line = line.strip()
+            if line.count(",") >= 8:
+                entries.append(line)
+    if not entries:
+        return
+
+    buckets = {"  0-50": 0, " 50-100": 0, "100-200": 0, "  200+": 0}
+    total = 0
+    latencies: list[float] = []
+    for e in entries:
+        parts = e.split(",")
+        try:
+            lat = float(parts[6])
+        except (ValueError, IndexError):
+            continue
+        total += 1
+        latencies.append(lat)
+        if lat < 50:
+            buckets["  0-50"] += 1
+        elif lat < 100:
+            buckets[" 50-100"] += 1
+        elif lat < 200:
+            buckets["100-200"] += 1
+        else:
+            buckets["  200+"] += 1
+
+    if total > 0:
+        avg_all = sum(latencies) / total
+        print(c(f"\n  延迟分布 (总数 {total}, 平均 {avg_all:.0f}ms):", C.LC))
+        max_count = max(buckets.values()) or 1
+        max_width = 30
+        for label, count in buckets.items():
+            bar_len = int(count / max_count * max_width)
+            bar = "\u2588" * bar_len
+            print(f"  {label}ms: {bar} {count}")
+
+    geo: dict[str, list[float]] = {}
+    for e in entries:
+        parts = e.split(",")
+        country = parts[4] if len(parts) > 4 else ""
+        if not country:
+            country = "Unknown"
+        try:
+            lat = float(parts[6])
+        except (ValueError, IndexError):
+            lat = 0
+        geo.setdefault(country, []).append(lat)
+
+    if geo:
+        print(c("\n  地理聚合 (按国家/地区):", C.LC))
+        for country, lats in sorted(geo.items(), key=lambda x: -len(x[1])):
+            avg_lat = sum(lats) / len(lats)
+            print(f"  {country}: {len(lats)} 节点, 平均延迟 {avg_lat:.0f}ms")
+
+
 def main() -> None:
     main_start = time.time()
     parser = argparse.ArgumentParser(
@@ -966,6 +1026,7 @@ def main() -> None:
     print_total_time(time.time() - main_start)
 
     if csv_path and csv_path.exists():
+        _print_visualization(csv_path)
         _serve_download(csv_path)
 
 
