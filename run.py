@@ -868,20 +868,20 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     if not verified_file.exists() or verified_file.stat().st_size == 0:
         return 0
 
-    existing_ips: set[str] = set()
+    existing: set[str] = set()
     with open(verified_file) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or line.startswith("IP"):
                 continue
-            ip = line.split(",")[0]
-            if ":" not in ip:
-                existing_ips.add(ip)
+            parts = line.split(",")
+            if len(parts) >= 2:
+                existing.add(f"{parts[0]}:{parts[1]}")
 
-    if not existing_ips:
+    if not existing:
         return 0
 
-    print(f"  [当前结果] 通过 {len(existing_ips)} 个 IP")
+    print(f"  [当前结果] 通过 {len(existing)} 个 IP:端口")
     try:
         ch = input(c("  是否启用深度挖掘？(提取 IP -> /16 CIDR 二次扫描, y/n, 回车跳过): ", C.Y)).strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -904,8 +904,9 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     print(f"  扩展为 /{prefix} CIDR")
 
     cidr_set: set[str] = set()
-    for ip in existing_ips:
+    for ip_port in existing:
         try:
+            ip = ip_port.split(":")[0]
             net = ipaddress.ip_network(ip, strict=False)
             cidr_set.add(str(net.supernet(new_prefix=prefix)))
         except ValueError:
@@ -917,7 +918,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     cidrs = sorted(cidr_set)
     total_possible = sum(ipaddress.ip_network(c).num_addresses for c in cidrs)
 
-    print(f"  深度挖掘: {len(existing_ips)}条IP -> {len(cidrs)}段 / {prefix} CIDR（{total_possible:,}条IP）")
+    print(f"  深度挖掘: {len(existing)}条IP:端口 -> {len(cidrs)}段 /{prefix} CIDR（{total_possible:,}条IP）")
 
     ensure_cf_scanner()
 
@@ -1014,7 +1015,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     if new_results:
         enrich_geoip(new_results)
 
-    real_new = [r for r in new_results if r["ip"] not in existing_ips]
+    real_new = [r for r in new_results if f"{r['ip']}:{r.get('port','443')}" not in existing]
 
     if real_new:
         with open(verified_file, "a") as f:
