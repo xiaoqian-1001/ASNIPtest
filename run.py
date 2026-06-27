@@ -579,7 +579,7 @@ def main() -> None:
     parser.add_argument("-R", "--random", action="store_true",
                         help="随机 5 端口快速探测")
     parser.add_argument("-P", "--probe-ports", metavar="N", type=int,
-                        help="在常规端口基础上追加 N 个随机高端口探活 (10000-65535)")
+                        help="在常规端口基础上追加 N 个随机端口探活 (全端口范围，排除已选)")
     parser.add_argument("-r", "--rate", metavar="PPS", type=int,
                         help="Masscan 发包速率 (默认自动探测)")
     parser.add_argument("--skip-masscan", action="store_true",
@@ -662,7 +662,7 @@ def main() -> None:
                 print(f"  扫描端口: {cfg.scan_ports}")
         else:
             try:
-                probe = input(c("  追加高端口探活? (数量/回车跳过, 1-100): ", C.Y)).strip()
+                probe = input(c("  追加随机端口探活? (数量/回车跳过, 1-100): ", C.Y)).strip()
             except (EOFError, KeyboardInterrupt):
                 probe = ""
             if probe.isdigit():
@@ -670,7 +670,7 @@ def main() -> None:
                 extra = random_probe_ports(n, cfg.scan_ports)
                 if extra:
                     cfg.scan_ports = cfg.scan_ports + "," + extra
-                    print(f"  默认端口 +{n} 高端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})")
+                    print(f"  默认端口 +{n} 端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})")
     else:
         cp = _parse_custom_port(sys.argv[1:])
         if cp:
@@ -684,7 +684,7 @@ def main() -> None:
         extra = random_probe_ports(n, cfg.scan_ports)
         if extra:
             cfg.scan_ports = cfg.scan_ports + "," + extra
-            print(c(f"  随机探口: +{n} 个高端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})", C.CY))
+            print(c(f"  随机探口: +{n} 个端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})", C.CY))
         else:
             print(c(f"  随机探口: 无新端口可追加", C.Y))
 

@@ -133,7 +133,7 @@ def random_probe_ports(n: int, existing_ports: str) -> str:
             existing.add(int(part))
     result: list[str] = []
     attempts = 0
-    hi_ranges = [(10000, 19999), (20000, 60000), (60001, 65535)]
+    hi_ranges = [(1, 9999), (10000, 19999), (20000, 60000), (60001, 65535)]
     while len(result) < n and attempts < n * 20:
         lo, hi = hi_ranges[attempts % 3]
         port = random.randint(lo, hi)
