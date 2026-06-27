@@ -1,6 +1,6 @@
 <p align="center">
   <br>
-  <img src="https://img.shields.io/badge/version-2.2.3-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-2.2.4-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.8+-green?style=flat-square" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20|%20macOS%20|%20WSL2-lightgrey?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange?style=flat-square" alt="license">
@@ -35,6 +35,8 @@
 | ⏱️ HTTP 延迟 | TCP + HTTP 双协议延迟测量 |
 | 📊 CSV 增强 | IP位置 + ASN组织 + GeoIP 信息自动填充 |
 | 💻 跨平台 | Linux / macOS / Windows (WSL2) 全支持 |
+| 🔁 增量扫描 | `-i` 仅扫描 ASN 新增 CIDR 段，结果与历史自动合并 |
+| 📈 可视化摘要 | 扫描完成后输出延迟分布直方图 + 地理聚合统计 |
 
 ---
 
@@ -66,6 +68,7 @@ qian AS209242,1.2.3.0/24         # ASN + CIDR 混合输入
 -P 10          # 在常规端口上追加 N 个随机端口探活
 -d             # 深度扫描 (命中 IP 追加宽端口)
 -s             # 扫描后自动测速
+-i             # 增量扫描 (仅扫新增 CIDR，合并历史结果)
 -r 4000        # 指定发包速率
 --smart        # 智能子网分级 (大 CIDR 自动探活)
 -g             # 下载离线 GeoIP 数据库
@@ -74,7 +77,7 @@ qian AS209242,1.2.3.0/24         # ASN + CIDR 混合输入
 ### 🔧 管理与组合
 
 ```bash
-qian AS209242 -w -d -s            # 组合使用
+qian AS209242 -w -d -s -i         # 组合使用
 qian AS209242 --skip-masscan      # 断点续扫
 qian update                       # 更新到最新版
 qian uninstall                    # 卸载
@@ -291,6 +294,12 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：
 ---
 
 ## 📝 更新日志
+
+### 🔖 v2.2.4
+
+- 🔁 新增 `-i` / `--incremental` 增量扫描：仅扫描 ASN 新增 CIDR 段，结果与历史自动合并去重
+- 📈 扫描完成自动输出 ASCII 延迟分布直方图 + 按国家/地区地理聚合统计
+- 🖥️ 增量扫描交互提示仅在存在历史状态时显示，首次扫描不打扰
 
 ### 🔖 v2.2.3
 
