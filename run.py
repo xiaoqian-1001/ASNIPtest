@@ -731,6 +731,16 @@ def main() -> None:
                 print(c("  [已跳过] 深度扫描 (回车自动选择)", C.G))
         except (EOFError, KeyboardInterrupt):
             do_deep = False
+    if not a.incremental and not sys.argv[1:]:
+        try:
+            ch = input(c("  增量扫描？(仅扫描新增CIDR, y/n, 回车跳过): ", C.Y)).strip().lower()
+            a.incremental = ch == "y"
+            if a.incremental:
+                print(c("  [已确认] 增量扫描 (对比上次CIDR，仅扫新增)", C.G))
+            else:
+                print(c("  [已跳过] 增量扫描 (回车自动选择)", C.G))
+        except (EOFError, KeyboardInterrupt):
+            pass
     if do_speed:
         total_steps += 1
     if do_deep:
