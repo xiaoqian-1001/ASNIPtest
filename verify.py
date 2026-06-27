@@ -12,6 +12,7 @@ import time
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Optional
 
 from lib.utils import write_progress, write_progress_done
