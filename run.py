@@ -686,7 +686,7 @@ def main() -> None:
         targets_desc.append(
             f"IPv4 ({len(v4_cidrs)} 条) {', '.join(v4_cidrs[:3])}"
             f"{'...' if len(v4_cidrs) > 3 else ''}")
-    print(c(f"  [验证通过] 目标 CIDR：{'  '.join(targets_desc)}", C.G))
+    print(c(f"  [验证通过] 目标：{'  '.join(targets_desc)}", C.G))
 
     if a.rate:
         cfg.masscan_rate = max(100, a.rate)
