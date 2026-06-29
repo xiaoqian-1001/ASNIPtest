@@ -729,7 +729,7 @@ def main() -> None:
                 print(f"  扫描端口: {cfg.scan_ports}")
         else:
             try:
-                probe = input(c("  追加随机端口探活? (数量/回车跳过, 1-100): ", C.Y)).strip()
+                probe = input(c("  是否追加随机端口探活：请输入探测数量（取值 1-100），回车则跳过该步骤：", C.Y)).strip()
             except (EOFError, KeyboardInterrupt):
                 probe = ""
             if probe.isdigit():
