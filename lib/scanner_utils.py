@@ -559,12 +559,12 @@ def parse_targets(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]
     raw = ""
     if not raw_args:
         try:
-            raw = input("  输入 ASN 或 CIDR (多个用逗号分隔): ").strip()
+            raw = input("  填写 ASN 编号或 CIDR 网段，多条记录用英文逗号分隔： ").strip()
         except (EOFError, KeyboardInterrupt):
             try:
                 with open("/dev/tty") as tty:
                     os.dup2(tty.fileno(), 0)
-                raw = input("  输入 ASN 或 CIDR (多个用逗号分隔): ").strip()
+                raw = input("  填写 ASN 编号或 CIDR 网段，多条记录用英文逗号分隔： ").strip()
             except Exception:
                 print(f"\n  请在终端运行: cd {BASE} && python3 run.py\n")
                 sys.exit(0)
