@@ -294,6 +294,12 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：
 
 > 💡 建议 KVM VPS 或物理机部署。
 
+### ⚠️ 友情提示
+
+- 请勿使用主力机、大厂云服务器运行扫描任务
+- 优先选用各类抗投诉 VPS
+- 家用宽带切勿单日高频操作
+
 ---
 
 ## 📝 更新日志
@@ -432,9 +438,12 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：
 
 - [e13815332] — 原作者，项目架构与核心扫描流程
 - [cmliu] — [CF-Workers-CheckProxyIP] 公共 API
+- [XIU2] — [CloudflareSpeedTest] 测速优选
 
 [masscan]: https://github.com/robertdavidgraham/masscan
 [RIPEStat API]: https://stat.ripe.net/
 [e13815332]: https://github.com/e13815332
 [cmliu]: https://github.com/cmliu
 [CF-Workers-CheckProxyIP]: https://github.com/cmliu/CF-Workers-CheckProxyIP
+[XIU2]: https://github.com/XIU2
+[CloudflareSpeedTest]: https://github.com/XIU2/CloudflareSpeedTest
