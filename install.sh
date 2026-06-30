@@ -54,7 +54,7 @@ do_uninstall() {
     for d in "$PROJECT_DIR" "$HOME/cf-ip-scanner.tmp"; do
         [ -d "$d" ] && rm -rf "$d" && info "已删除 $d"
     done
-    local w="/usr/local/bin/xiaoqian"
+    local w="/usr/local/bin/qian"
     [ -f "$w" ] && sudo rm -f "$w" && info "已删除 $w"
     echo ""
     echo -e "${GREEN}[OK] 卸载完成${NC}"

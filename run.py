@@ -7,7 +7,6 @@ import sys
 import os
 import re
 import time
-import json
 import ipaddress
 import argparse
 import subprocess
@@ -31,7 +30,7 @@ from lib.utils import (
 )
 from lib.geoip import lookup as geo_lookup, is_available as geo_available, geo_update_interactive
 from lib.scanner_utils import (
-    find_iface, probe_masscan_rate, detect_hardware, tcp_latency, cf_download, test_one,
+    probe_masscan_rate, detect_hardware, test_one,
     read_masscan_stderr, parse_masscan_xml,
     read_default_ports, parse_targets, expand_cidrs, port_count,
     split_port_batches, adjust_concurrency, random_ports, random_probe_ports,
@@ -41,8 +40,7 @@ from lib.scanner_utils import (
 )
 from lib.scanner_pipeline import (
     BASE, resolve_asn_cidrs, run_masscan, run_cf_scanner, verify_batch,
-    smart_subnet_probe, ensure_cf_scanner,
-    enrich_geoip, geo_available as pipeline_geo_available,
+    smart_subnet_probe, ensure_cf_scanner, enrich_geoip,
 )
 
 VERSION = "unknown"
@@ -54,6 +52,101 @@ except OSError:
     pass
 
 _SUBNET_THRESHOLD = 20
+
+
+_CSV_HEADER = "IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议"
+
+
+def _format_csv_line(parts: list[str], do_geo: bool = False) -> str:
+    ip = parts[0]
+    port = parts[1]
+    colo = parts[3] if len(parts) > 3 else ""
+    country = parts[4] if len(parts) > 4 else ""
+    city = parts[5] if len(parts) > 5 else ""
+    latency = parts[6] if len(parts) > 6 else ""
+    spd = parts[7] if len(parts) > 7 else ""
+    asn_val = parts[8] if len(parts) > 8 else ""
+    proto = "IPv6" if ":" in ip else "IPv4"
+    if do_geo:
+        try:
+            gi = geo_lookup(ip)
+            if gi:
+                if gi.get("country") and not country:
+                    country = gi["country"]
+                if gi.get("city"):
+                    city = gi["city"]
+        except Exception:
+            pass
+    return f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn_val},{proto}"
+
+
+def _run_masscan_batches(ip_file: Path, ports_def: str, rate: int,
+                          xml_basename: str, result_file: Path) -> list[str]:
+    batches = split_port_batches(ports_def)
+    total_ports = port_count(ports_def)
+    if len(batches) > 1:
+        print(f"  端口总数 {total_ports} -> {len(batches)} 批次扫描 (~{_MASSCAN_BATCH}/批)")
+
+    all_open: list[str] = []
+    batch_total = len(batches)
+    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
+    step_start = time.time()
+
+    for bi, batch_ports in enumerate(batches):
+        batch_xml = BASE / f"{xml_basename}.xml" if batch_total == 1 else BASE / f"{xml_basename}_{bi + 1}.xml"
+        cmd = sudo + [
+            "masscan", "-iL", str(ip_file),
+            "-p", batch_ports,
+            "--rate", str(rate),
+            "-oX", str(batch_xml),
+            "--wait", "3",
+        ]
+        prefix = f"[{bi + 1}/{batch_total}] " if batch_total > 1 else ""
+
+        def _m_progress(pct, _extra):
+            elapsed = time.time() - step_start
+            eta = (elapsed / pct * (100 - pct)) if pct > 1 else 0
+            eta_s = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 1 else ""
+            write_progress(pct, prefix + eta_s)
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        stderr_lines = read_masscan_stderr(proc, prefix, _m_progress)
+        proc.wait()
+
+        if proc.returncode != 0:
+            sys.stderr.write("\n"); sys.stderr.flush()
+            err = "".join(stderr_lines).lower()
+            if "permission denied" in err or "init: failed" in err:
+                print(c("  [FAIL] Masscan 需要 raw socket 权限", C.LR))
+                if os.geteuid() != 0:
+                    print("  解决: sudo python3 run.py ... (以 root 运行)")
+                    print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
+            elif "password is required" in err:
+                print(c("  [FAIL] sudo 需要密码交互", C.LR))
+            else:
+                sys.stderr.write("".join(stderr_lines)); sys.stderr.flush()
+                print(c(f"\n  [FAIL] Masscan 返回码 {proc.returncode}", C.LR))
+            raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+        write_progress_done(prefix)
+
+        if os.geteuid() != 0:
+            subprocess.run(["sudo", "-n", "chown",
+                            f"{os.getuid()}:{os.getgid()}", str(batch_xml)],
+                           stdin=subprocess.DEVNULL, check=False)
+
+        if batch_total > 1:
+            print(f"  解析 {batch_xml.name} ...", flush=True)
+        all_open.extend(parse_masscan_xml(batch_xml))
+
+        if batch_total > 1:
+            try: batch_xml.unlink()
+            except OSError: pass
+
+    result_file.write_text("\n".join(all_open) + "\n")
+    return all_open
 
 
 @dataclass
@@ -143,83 +236,13 @@ def step_masscan(cfg: ScannerConfig) -> int:
         tmp_v4.write_text("\n".join(v4_only) + "\n")
         ip_file = tmp_v4
 
-    batches = split_port_batches(cfg.scan_ports)
-    total_ports = port_count(cfg.scan_ports)
-    if len(batches) > 1:
-        print(f"  端口总数 {total_ports} -> {len(batches)} 批次扫描 (~{_MASSCAN_BATCH}/批)")
-
-    all_open: list[str] = []
-    batch_total = len(batches)
-    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
-    adapter_ip = None
-    step_start = time.time()
-
-    for bi, batch_ports in enumerate(batches):
-        batch_xml = BASE / "masscan_result.xml" if batch_total == 1 else BASE / f"masscan_batch_{bi + 1}.xml"
-        cmd = sudo + [
-            "masscan", "-iL", str(ip_file),
-            "-p", batch_ports,
-            "--rate", str(cfg.masscan_rate),
-            "-oX", str(batch_xml),
-            "--wait", "3",
-        ]
-        prefix = f"[{bi + 1}/{batch_total}] " if batch_total > 1 else ""
-
-        def _masscan_progress(pct, _extra):
-            elapsed = time.time() - step_start
-            eta = (elapsed / pct * (100 - pct)) if pct > 1 else 0
-            eta_s = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 1 else ""
-            write_progress(pct, prefix + eta_s)
-
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, text=True, bufsize=1)
-        stderr_lines = read_masscan_stderr(proc, prefix, _masscan_progress)
-        proc.wait()
-
-        if proc.returncode != 0:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-            err = "".join(stderr_lines).lower()
-            if "permission denied" in err or "init: failed" in err:
-                print(c("  [FAIL] Masscan 需要 raw socket 权限", C.LR))
-                if os.geteuid() != 0:
-                    print("  解决: sudo python3 run.py ...  (以 root 运行)")
-                    print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
-            elif "password is required" in err or "a password is required" in err:
-                print(c("  [FAIL] sudo 需要密码交互，当前环境无法输入", C.LR))
-                print("  解决: sudo python3 run.py ...  (以 root 运行)")
-                print("  或: sudo setcap cap_net_raw+ep $(which masscan)")
-            else:
-                sys.stderr.write("".join(stderr_lines))
-                sys.stderr.flush()
-                print(c(f"\n  [FAIL] Masscan 返回码 {proc.returncode}", C.LR))
-            raise subprocess.CalledProcessError(proc.returncode, cmd)
-
-        write_progress_done(prefix)
-
-        if os.geteuid() != 0:
-            subprocess.run(["sudo", "-n", "chown",
-                            f"{os.getuid()}:{os.getgid()}", str(batch_xml)],
-                           stdin=subprocess.DEVNULL, check=False)
-
-        if batch_total > 1:
-            print(f"  解析 {batch_xml.name} ...", flush=True)
-        all_open.extend(parse_masscan_xml(batch_xml))
-
-        if batch_total > 1:
-            try:
-                batch_xml.unlink()
-            except OSError:
-                pass
-
-    text_file = BASE / "masscan_result.txt"
-    text_file.write_text("\n".join(all_open) + "\n")
+    result_file = BASE / "masscan_result.txt"
+    all_open = _run_masscan_batches(ip_file, cfg.scan_ports, cfg.masscan_rate,
+                                     "masscan_result", result_file)
     print(f"  开放端口: {len(all_open)}（Syn-Ack确认）")
     step_s = int(time.time() - step_start)
     m, s = divmod(step_s, 60)
     print(c(f"  本步耗时: {m}分{s}秒" if m else f"  本步耗时: {step_s}秒", C.GY))
-
     return len(all_open)
 
 def _pipeline(cfg: ScannerConfig) -> tuple[int, int]:
@@ -336,72 +359,9 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
     ip_file = BASE / "deep_ips.txt"
     ip_file.write_text("\n".join(sorted(ips)) + "\n")
 
-    xml_file = BASE / "deep_result.xml"
-    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
-    batches = split_port_batches(WIDE_PORTS)
-    all_open: list[str] = []
-
-    for bi, batch_ports in enumerate(batches):
-        batch_xml = xml_file if len(batches) == 1 else BASE / f"deep_batch_{bi + 1}.xml"
-        cmd = sudo + [
-            "masscan", "-iL", str(ip_file),
-            "-p", batch_ports,
-            "--rate", str(cfg.masscan_rate),
-            "-oX", str(batch_xml),
-            "--wait", "3",
-        ]
-        prefix = f"[{bi + 1}/{len(batches)}] " if len(batches) > 1 else ""
-
-        deep_masscan_start = time.time()
-        def _deep_progress(pct, _extra):
-            elapsed = time.time() - deep_masscan_start
-            eta = (elapsed / pct * (100 - pct)) if pct > 1 else 0
-            eta_s = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 1 else ""
-            write_progress(pct, prefix + eta_s)
-
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, text=True, bufsize=1)
-        stderr_lines = read_masscan_stderr(proc, prefix, _deep_progress)
-        proc.wait()
-
-        if proc.returncode != 0:
-            sys.stderr.write("\n"); sys.stderr.flush()
-            err = "".join(stderr_lines).lower()
-            if "permission denied" in err or "password is required" in err:
-                print(c("  [FAIL] masscan 权限不足", C.LR))
-            raise subprocess.CalledProcessError(proc.returncode, cmd)
-
-        write_progress_done(prefix)
-
-        if os.geteuid() != 0:
-            subprocess.run(["sudo", "-n", "chown",
-                            f"{os.getuid()}:{os.getgid()}", str(batch_xml)],
-                           stdin=subprocess.DEVNULL, check=False)
-
-        batch_before = len(all_open)
-        all_open.extend(parse_masscan_xml(batch_xml))
-
-        new_in_batch = len(all_open) - batch_before
-        print(f"  {prefix}端口开放: +{new_in_batch} (累计 {len(all_open)})", flush=True)
-
-        if new_in_batch == 0 and bi + 1 < len(batches) and sys.stdin.isatty():
-            try:
-                ch = input(c("   > 本批无新端口, 继续下批? (y/n, 回车继续): ", C.Y)).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                ch = ""
-            if ch == "n":
-                print(c(f"  [已跳过] 用户终止剩余 {len(batches) - bi - 1} 批次", C.G))
-                break
-
-        if len(batches) > 1:
-            try:
-                batch_xml.unlink()
-            except OSError:
-                pass
-
     result_file = BASE / "masscan_result.txt"
-    result_file.write_text("\n".join(all_open) + "\n")
+    all_open = _run_masscan_batches(ip_file, WIDE_PORTS, cfg.masscan_rate,
+                                     "deep_result", result_file)
     print(c(f"  深度 Masscan 完成: {len(all_open)} 开放端口", C.CY))
 
     if not all_open:
@@ -700,6 +660,16 @@ def _interactive_choices(a, v4_cidrs: list[str], asns: list[str]) -> tuple[bool,
                     print(c("  [已跳过] 增量扫描 (回车自动选择)", C.G))
             except (EOFError, KeyboardInterrupt):
                 pass
+
+    if not a.self_speed and not sys.argv[1:]:
+        pass  # 交互延迟到扫描完成后，显示实际 IP 数量
+
+    if not a.ray_check and not sys.argv[1:]:
+        pass  # 同上
+
+    if not a.fission and not sys.argv[1:]:
+        pass  # 同上
+
     return do_speed, do_deep
 
 
@@ -731,6 +701,23 @@ def _build_steps(a, cfg, asns: list[str], v4_cidrs: list[str],
     return steps
 
 
+def _read_verified_entries() -> list[str]:
+    """Read verified.txt, return list of 'ip:port' strings."""
+    verified_file = BASE / "verified.txt"
+    if not verified_file.exists() or verified_file.stat().st_size == 0:
+        return []
+    entries: list[str] = []
+    with open(verified_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("IP"):
+                continue
+            parts = line.split(",")
+            if parts:
+                entries.append(f"{parts[0]}:{parts[1]}")
+    return entries
+
+
 def _cleanup_temp_files(a) -> None:
     for stale in ("cidrs.txt", "cidrs_v4.txt",
                   "masscan_result.xml", "cf_hits.txt", "verified.txt"):
@@ -750,7 +737,7 @@ def _cleanup_temp_files(a) -> None:
             p.unlink()
         except OSError:
             pass
-    for fname in ("deep_ips.txt",):
+    for fname in ("deep_ips.txt", ".cfst_ips.txt"):
         p = BASE / fname
         try:
             if p.exists():
@@ -764,6 +751,16 @@ def _cleanup_temp_files(a) -> None:
                 mp.unlink()
         except OSError:
             pass
+    # 清理旧的增量状态文件（保留最新一次）
+    incr_dir = INCR_DIR
+    if incr_dir.exists():
+        state_files = sorted(incr_dir.glob("*.state"))
+        if len(state_files) > 1:
+            for sf in state_files[:-1]:
+                try:
+                    sf.unlink()
+                except OSError:
+                    pass
 
 
 def _generate_csv(verified_file: Path, asns: list[str], a,
@@ -788,28 +785,10 @@ def _generate_csv(verified_file: Path, asns: list[str], a,
                 parsed.append(line)
 
     with open(csv_path, "w") as f:
-        f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
+        f.write(_CSV_HEADER + "\n")
         for p in parsed:
             parts = p.split(",")
-            ip = parts[0]
-            port = parts[1]
-            colo = parts[3]
-            country = parts[4]
-            city = parts[5]
-            latency = parts[6]
-            asn_val = parts[8]
-            proto = "IPv6" if ":" in ip else "IPv4"
-            try:
-                gi = geo_lookup(ip)
-                if gi:
-                    if gi.get("country") and not country:
-                        country = gi["country"]
-                    if gi.get("city"):
-                        city = gi["city"]
-            except Exception:
-                pass
-            spd = parts[7] if len(parts) > 7 else ""
-            f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn_val},{proto}\n")
+            f.write(_format_csv_line(parts, do_geo=True) + "\n")
 
     print(c(f"  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
 
@@ -830,19 +809,9 @@ def _generate_csv(verified_file: Path, asns: list[str], a,
             merged[key] = line
         merged_lines = sorted(merged.values())
         with open(csv_path, "w") as f:
-            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
+            f.write(_CSV_HEADER + "\n")
             for p in merged_lines:
-                parts = p.split(",")
-                ip = parts[0]
-                port = parts[1]
-                colo = parts[3] if len(parts) > 3 else ""
-                country = parts[4] if len(parts) > 4 else ""
-                city = parts[5] if len(parts) > 5 else ""
-                latency = parts[6] if len(parts) > 6 else ""
-                asn_v = parts[8] if len(parts) > 8 else ""
-                proto = "IPv4"
-                spd = parts[7] if len(parts) > 7 else ""
-                f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn_v},{proto}\n")
+                f.write(_format_csv_line(p.split(",")) + "\n")
         print(c(f"  合并: {len(incr_saved_results) - 1} 历史 + {new_count} 新增 -> {len(merged)} 条", C.CY))
         passed_count = len(merged)
         save_incremental_state(incr_tag, incr_full_cidrs or v4_list, merged_lines)
@@ -857,6 +826,15 @@ def _generate_csv(verified_file: Path, asns: list[str], a,
 CFST_DIR = Path.home() / ".config" / "ip-tidy"
 CFST_BIN = CFST_DIR / "cfst"
 CFST_DEFAULT_LIMIT = 15
+CFST_DELAY_WEIGHT = 20
+CFST_DOWNLOAD_WEIGHT = 80
+CFST_HEARTBEAT_THRESHOLD = 10
+CFST_MIN_ESTIMATED_SECONDS = 60
+CFST_MAX_HEARTBEAT_PCT = 95
+HTTP_SERVER_PORT = 8899
+HTTP_SERVER_PORT_RANGE_END = 9900
+CFST_READ_BUFFER_SIZE = 65536
+SIGINT_EXIT_CODE = 130
 
 
 def _ensure_cfst_binary() -> Path:
@@ -887,8 +865,10 @@ def _ensure_cfst_binary() -> Path:
         os.chmod(str(CFST_BIN), 0o755)
         print(c(f"  [CFST] 已安装到 {CFST_BIN}", C.G))
         return CFST_BIN
-    except Exception:
-        print(c(f"  [FAIL] cfst 下载失败，请手动安装到 {CFST_BIN}", C.LR))
+    except Exception as _e:
+        print(c(f"  [FAIL] cfst 下载失败: {_e}", C.LR))
+        print(c(f"  [提示] 请手动下载 cfst 并放置到 {CFST_BIN}", C.LY))
+        print(c(f"  [提示] 下载地址: https://github.com/XIU2/CloudflareSpeedTest/releases", C.LY))
         raise
     finally:
         if _tmp_path and os.path.exists(_tmp_path):
@@ -915,18 +895,27 @@ def _parse_cfst_buffer(_buffer: bytes, _all_lines: list[str],
             continue
         _all_lines.append(_line)
 
+        # 多策略判断阶段切换，避免 cfst 格式变更导致卡死
+        _phase_changed = False
         if "下载测速" in _line:
             _phase = "download"
-            _current = 0
+            _phase_changed = True
+        elif "延迟测速" in _line and _phase == "delay":
+            pass  # 已在 delay 阶段
+        elif "可用:" in _line and _phase == "delay":
+            # 延迟测速进度行含 "可用: N"
+            pass
 
         _m = re.search(r"(\d+)\s*/\s*(\d+)", _line)
         if _m:
             _current = int(_m.group(1))
             _detected = int(_m.group(2))
             if _phase == "delay":
-                _delay_total = _detected
+                if _detected > _delay_total:
+                    _delay_total = _detected
             else:
-                _download_total = _detected
+                if _detected > _download_total:
+                    _download_total = _detected
 
     return _buffer, _phase, _current, _delay_total, _download_total
 
@@ -934,25 +923,14 @@ def _parse_cfst_buffer(_buffer: bytes, _all_lines: list[str],
 def _compute_cfst_progress(_phase: str, _current: int,
                            _delay_total: int, _download_total: int) -> float:
     if _phase == "delay":
-        return min(_current / max(_delay_total, 1) * 20, 20)
+        return min(_current / max(_delay_total, 1) * CFST_DELAY_WEIGHT, CFST_DELAY_WEIGHT)
     else:
-        return 20 + min(_current / max(_download_total, 1) * 80, 80)
+        return CFST_DELAY_WEIGHT + min(_current / max(_download_total, 1) * CFST_DOWNLOAD_WEIGHT, CFST_DOWNLOAD_WEIGHT)
 
 
-def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
-    if not (verified_file.exists() and verified_file.stat().st_size > 0):
-        return
-
-    ips: set[str] = set()
-    with open(verified_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("IP"):
-                continue
-            parts = line.split(",")
-            if parts:
-                ips.add(parts[0])
-
+def _run_cfst_speedtest(a, tag: str) -> None:
+    entries = _read_verified_entries()
+    ips: set[str] = {e.split(":")[0] for e in entries}
     if not ips:
         return
 
@@ -1013,12 +991,14 @@ def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
     _current = 0
     _delay_total = 1
     _download_total = cfst_limit
+    _last_update = time.time()
+    _heartbeat_count = 0
 
     while True:
         if proc.poll() is not None:
             try:
                 while True:
-                    _chunk = os.read(fd, 65536)
+                    _chunk = os.read(fd, CFST_READ_BUFFER_SIZE)
                     if not _chunk:
                         break
                     _buffer += _chunk
@@ -1026,10 +1006,12 @@ def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
                 pass
             break
 
+        _updated = False
         try:
-            _chunk = os.read(fd, 65536)
+            _chunk = os.read(fd, CFST_READ_BUFFER_SIZE)
             if _chunk:
                 _buffer += _chunk
+                _updated = True
         except (BlockingIOError, OSError):
             pass
 
@@ -1037,8 +1019,21 @@ def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
             _buffer, _all_lines, _phase, _current, _delay_total, _download_total
         )
 
+        # 心跳回退：如果一段时间没有收到进度更新，使用时间估算
+        if not _updated:
+            _heartbeat_count += 1
+        else:
+            _last_update = time.time()
+            _heartbeat_count = 0
+
         _elapsed = time.time() - _start_time
         _pct = _compute_cfst_progress(_phase, _current, _delay_total, _download_total)
+
+        # 如果解析不到进度，用时间估算（最多显示到 95%，避免假完成）
+        if _pct <= 1 and _heartbeat_count > CFST_HEARTBEAT_THRESHOLD:
+            _total_estimated = max(_elapsed + 30, CFST_MIN_ESTIMATED_SECONDS)  # 至少预估 60 秒
+            _pct = min(_elapsed / _total_estimated * 100, CFST_MAX_HEARTBEAT_PCT)
+
         if _pct > 1:
             _eta = _elapsed / _pct * (100 - _pct)
             _eta_s = f" | ETA {int(_eta // 60)}分{int(_eta % 60)}秒"
@@ -1102,7 +1097,180 @@ def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
     else:
         print(c("  [CFST] 结果文件为空", C.LY))
 
-    return result_file
+
+
+def _run_self_speed_pipeline(a) -> None:
+    ips = _read_verified_entries()
+    if not ips:
+        return
+
+    if not a.self_speed:
+        try:
+            ch = input(c(f"  是否进行自实现测速？(RTT排序 + 滑动窗口峰值速度, {len(ips)} 个IP, y/n, 回车跳过): ", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ch = ""
+        if ch != "y":
+            print(c("  [已跳过] 自实现测速", C.LG))
+            return
+        try:
+            top_k_str = input(c(f"  RTT 排序保留前几条做带宽测试？(默认 {a.top_k}): ", C.Y)).strip()
+            if top_k_str.isdigit() and int(top_k_str) > 0:
+                a.top_k = int(top_k_str)
+        except (EOFError, KeyboardInterrupt):
+            pass
+        try:
+            bw_str = input(c(f"  期望带宽阈值 Mbps？(达到后提前终止, 默认 {a.bandwidth}): ", C.Y)).strip()
+            if bw_str.isdigit() and int(bw_str) > 0:
+                a.bandwidth = int(bw_str)
+        except (EOFError, KeyboardInterrupt):
+            pass
+    else:
+        print(c(f"  [自实现测速] 候选 IP: {len(ips)} 个, Top-K: {a.top_k}, 带宽阈值: {a.bandwidth}Mbps", C.G))
+
+    print(c(f"\n  [自实现测速] 候选 IP: {len(ips)} 个", C.LC))
+    print_sep("─", C.B)
+
+    print(c("  阶段 1/3: RTT 排序...", C.W))
+    from lib.rtt_sorter import rtt_sort as _rtt_sort
+    rtt_results = _rtt_sort(ips, top_k=a.top_k)
+    if not rtt_results:
+        print(c("  [FAIL] RTT 排序无可用结果", C.LR))
+        return
+    print(c(f"  RTT 排序完成，取前 {len(rtt_results)} 个", C.G))
+    for r in rtt_results[:3]:
+        print(c(f"    {r.ip}:{r.port}  {r.rtt_avg_ms}ms (抖动 {r.rtt_std_ms}ms)", C.W))
+    if len(rtt_results) > 3:
+        print(c(f"    ... 共 {len(rtt_results)} 个", C.GY))
+
+    print(c("  阶段 2/3: 滑动窗口速度测速...", C.W))
+    from lib.speed_tester import speed_test as _speed_test
+    rtt_map = {r.ip: r.rtt_avg_ms for r in rtt_results}
+    speed_candidates = [f"{r.ip}:{r.port}" for r in rtt_results]
+    speed_results = _speed_test(speed_candidates, bandwidth_target=a.bandwidth, rtt_results=rtt_map)
+    if not speed_results:
+        print(c("  [FAIL] 速度测试无可用结果", C.LR))
+        return
+
+    print(c(f"  速度测试完成，{len(speed_results)} 个有效结果", C.G))
+    for r in speed_results[:3]:
+        if r.error:
+            print(c(f"    {r.ip}:{r.port}  FAIL - {r.error}", C.LR))
+        else:
+            print(c(f"    {r.ip}:{r.port}  {r.peak_speed_kbps}kB/s ({r.bandwidth_mbps}Mbps)  colo={r.colo}", C.W))
+    if len(speed_results) > 3:
+        print(c(f"    ... 共 {len(speed_results)} 个", C.GY))
+
+    print(c("  阶段 3/3: 综合加权排序...", C.W))
+    from lib.weighted_scorer import weighted_sort as _weighted_sort
+    ranked = _weighted_sort(speed_results)
+    if not ranked:
+        return
+
+    print_sep("─", C.B)
+    print(c(f"  测速优选结果（按综合评分排序，共 {len(ranked)} 条）", C.LC))
+    header = f"{'IP':20s} {'端口':6s} {'延迟(ms)':10s} {'峰值kB/s':12s} {'带宽Mbps':10s} {'Colo':6s} {'评分':8s}"
+    print(c(f"  {header}", C.W))
+    for i, r in enumerate(ranked):
+        if i == 0:
+            color = C.LG
+        elif i < 3:
+            color = C.LY
+        else:
+            color = C.W
+        print(c(f"  {r.ip:20s} {r.port:<6d} {r.rtt_avg_ms:<10.1f} {r.peak_speed_kbps:<12.1f} {r.bandwidth_mbps:<10.1f} {r.colo:<6s} {r.score:<8.1f}", color))
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = "_".join(getattr(a, "targets", [])) or "cidr"
+    out_file = BASE / f"self_speed_{tag}_{ts}.csv"
+    with open(out_file, "w") as f:
+        f.write("IP,端口,延迟_ms,峰值速度_kBps,带宽_Mbps,数据中心,HTTP延迟_ms,抖动_ms,综合评分\n")
+        for r in ranked:
+            f.write(f"{r.ip},{r.port},{r.rtt_avg_ms},{r.peak_speed_kbps},{r.bandwidth_mbps},{r.colo},{r.http_latency_ms},{r.rtt_std_ms},{r.score}\n")
+    print()
+    print(c(f"  完整结果已保存到: {out_file.name}", C.G))
+    print_sep("─", C.B)
+
+
+def _run_ray_check(a) -> None:
+    candidates = _read_verified_entries()
+    if not candidates:
+        return
+
+    if not a.ray_check:
+        try:
+            ch = input(c(f"  是否进行 CF-RAY 头校验？(HTTP 确认 IP 路由到 Cloudflare, {len(candidates)} 个IP, y/n, 回车跳过): ", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ch = ""
+        if ch != "y":
+            print(c("  [已跳过] CF-RAY 头校验", C.LG))
+            return
+    else:
+        print(c(f"  [CF-RAY 校验] 候选 IP: {len(candidates)} 个", C.G))
+
+    print(c(f"\n  [CF-RAY 校验] 候选 IP: {len(candidates)} 个", C.LC))
+    print_sep("─", C.B)
+
+    from lib.ray_checker import ray_check as _ray_check
+    results = _ray_check(candidates)
+    passed = [r for r in results if r.ray_present]
+    print(c(f"  CF-RAY 校验完成: {len(passed)}/{len(results)} 通过", C.G if passed else C.LY))
+    for r in passed[:5]:
+        print(c(f"    {r.ip}:{r.port}  colo={r.colo}  {r.http_latency_ms}ms", C.W))
+    if len(passed) > 5:
+        print(c(f"    ... 共 {len(passed)} 个", C.GY))
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = BASE / f"ray_checked_{ts}.csv"
+    with open(out_file, "w") as f:
+        f.write("IP,端口,CF-RAY,数据中心,延迟_ms\n")
+        for r in results:
+            f.write(f"{r.ip},{r.port},{r.ray_present},{r.colo},{r.http_latency_ms}\n")
+    print(c(f"  完整结果已保存到: {out_file.name}", C.G))
+
+
+def _run_fission(a) -> None:
+    entries = _read_verified_entries()
+    seed_ips: set[str] = {e.split(":")[0].strip() for e in entries if e.split(":")[0].strip()}
+    if not seed_ips:
+        return
+
+    if not a.fission:
+        try:
+            ch = input(c(f"  是否启用裂变发现？(IP⇄域名反查迭代扩充候选IP, {len(seed_ips)} 个种子IP, y/n, 回车跳过): ", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ch = ""
+        if ch != "y":
+            print(c("  [已跳过] 裂变发现", C.LG))
+            return
+        try:
+            depth_str = input(c(f"  裂变深度？(默认 {a.fission_depth}): ", C.Y)).strip()
+            if depth_str.isdigit() and int(depth_str) > 0:
+                a.fission_depth = int(depth_str)
+        except (EOFError, KeyboardInterrupt):
+            pass
+    else:
+        print(c(f"  [裂变发现] 种子 IP: {len(seed_ips)} 个, 深度: {a.fission_depth}", C.G))
+
+    print(c(f"\n  [裂变发现] 种子 IP: {len(seed_ips)} 个, 深度: {a.fission_depth}, 最大 IP: {a.fission_max_ips}", C.LC))
+    print_sep("─", C.B)
+
+    from lib.fission_discoverer import fission_discover as _fission
+    new_ips = _fission(list(seed_ips), max_depth=a.fission_depth, max_ips=a.fission_max_ips)
+    if not new_ips:
+        print(c("  [裂变发现] 未发现新 IP", C.LY))
+        return
+
+    print(c(f"  [裂变发现] 新增 {len(new_ips)} 个 IP", C.G))
+    for ip in new_ips[:10]:
+        print(c(f"    {ip}", C.W))
+    if len(new_ips) > 10:
+        print(c(f"    ... 共 {len(new_ips)} 个", C.GY))
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = BASE / f"fission_{ts}.txt"
+    out_file.write_text("\n".join(sorted(new_ips)) + "\n")
+    print(c(f"  新 IP 列表已保存到: {out_file.name}", C.G))
+    print(c("  提示: 新 IP 可配合 --skip-masscan 用于下一轮扫描", C.CY))
 
 
 def main() -> None:
@@ -1145,6 +1313,20 @@ def main() -> None:
                         help="自动运行 CloudflareSpeedTest 对结果 IP 测速优选")
     parser.add_argument("--cfst-count", metavar="N", type=int, default=CFST_DEFAULT_LIMIT,
                         help=f"cfst 取前 N 条最优 IP (默认 {CFST_DEFAULT_LIMIT})")
+    parser.add_argument("--ray-check", action="store_true",
+                        help="CF-RAY HTTP 头校验，确认 IP 路由到 Cloudflare 节点")
+    parser.add_argument("--self-speed", action="store_true",
+                        help="使用自实现测速模块替代 cfst 二进制（含 RTT 排序 + 滑动窗口峰值速度）")
+    parser.add_argument("--top-k", metavar="N", type=int, default=10,
+                        help="RTT 排序保留前 N 个 IP 进入带宽测试 (默认 10)")
+    parser.add_argument("--bandwidth", metavar="MBPS", type=int, default=50,
+                        help="期望带宽阈值 Mbps，达到后提前终止该 IP 测速 (默认 50)")
+    parser.add_argument("--fission", action="store_true",
+                        help="启用裂变发现模式，通过 IP↔域名反查迭代扩充候选 IP")
+    parser.add_argument("--fission-depth", metavar="N", type=int, default=2,
+                        help="裂变最大深度 (默认 2)")
+    parser.add_argument("--fission-max-ips", metavar="N", type=int, default=1000,
+                        help="裂变最大 IP 数 (默认 1000)")
     a = parser.parse_args()
 
     if a.geo_update:
@@ -1242,7 +1424,7 @@ def main() -> None:
                     passed_count += added
         except KeyboardInterrupt:
             print(c("\n  [中断] 用户取消", C.LR))
-            sys.exit(130)
+            sys.exit(SIGINT_EXIT_CODE)
         except Exception as e:
             print(c(f"  [FAIL] {e}", C.LR))
             sys.exit(1)
@@ -1253,7 +1435,17 @@ def main() -> None:
                                             incr_full_cidrs, v4_list, passed_count)
 
     cfst_tag = "_".join(asns) if asns else "cidr"
-    _run_cfst_speedtest(verified_file, a, cfst_tag)
+
+    if a.self_speed:
+        _run_self_speed_pipeline(a)
+    else:
+        _run_cfst_speedtest(a, cfst_tag)
+
+    if a.ray_check:
+        _run_ray_check(a)
+
+    if a.fission:
+        _run_fission(a)
 
     print_result_header(
         len(asns), cidr_count_val, total_open, cf_nodes, passed_count, v4_cidr_count,
@@ -1328,55 +1520,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     cidr_file = BASE / ".deep_mine_cidrs.txt"
     cidr_file.write_text("\n".join(cidrs) + "\n")
 
-    step_start = time.time()
-
-    def _cb(typ, data):
-        if typ == "masscan_progress":
-            cur = data.get("current", 0)
-            total = data.get("total", 1)
-            pct = min(cur / total * 100, 100)
-            elapsed = time.time() - step_start
-            eta = (elapsed / pct * (100 - pct)) if pct > 1 else 0
-            eta_s = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 1 else ""
-            write_progress(pct, eta_s)
-        elif typ == "scan_progress":
-            cur = data.get("current", 0)
-            total = data.get("total", 1)
-            pct = min(cur / total * 100, 100)
-            elapsed = time.time() - step_start
-            eta = (elapsed / pct * (100 - pct)) if pct > 1 else 0
-            eta_s = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 1 else ""
-            write_progress(pct, f" | CF检测{eta_s}")
-        elif typ == "log":
-            msg = str(data)
-            if msg.startswith("API 验证") or "Masscan 批次" in msg:
-                return
-            sys.stderr.write("\n\r")
-            sys.stderr.flush()
-            print(f"  {msg}")
-        elif typ == "error":
-            print(c(f"  [FAIL] {data}", C.LR))
-
-    masscan_hits: list[str] = []
-
-    if os.path.exists("/usr/local/bin/masscan") or os.system("which masscan >/dev/null 2>&1") == 0:
-        masscan_rate = probe_masscan_rate(quiet=True)
-        print(c("  ─" * 30, C.B))
-        print(c("  基于 Masscan 执行端口扫描任务", C.LC))
-        print(c("  ─" * 30, C.B))
-        ms_start = time.time()
-        masscan_hits = run_masscan(cidr_file, cfg.scan_ports, masscan_rate, progress_callback=_cb)
-        ms_elapsed = int(time.time() - ms_start)
-        ms_m, ms_s = divmod(ms_elapsed, 60)
-        print(c(f"  本步耗时: {ms_m}分{ms_s}秒" if ms_m else f"  本步耗时: {ms_s}秒", C.GY))
-    else:
-        print("  Masscan 不可用，直接从 CIDR 扩展 IP 进行 cf-scanner 扫描...")
-        port_list = [p.strip() for p in cfg.scan_ports.split(",") if p.strip().isdigit()]
-        ips = expand_cidrs(cidrs, max_ips=5000)
-        for ip in ips:
-            for p in port_list[:3]:
-                masscan_hits.append(f"{ip}:{p}")
-
+    masscan_hits = _run_deep_mine_scan(cidr_file, cfg)
     if not masscan_hits:
         write_progress_done(" | 无开放端口")
         print(c("  深度挖掘: 未发现开放端口", C.LY))
@@ -1387,11 +1531,13 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     cf_out = BASE / ".deep_mine_cf_out.txt"
     cf_in.write_text("\n".join(masscan_hits) + "\n")
 
+    step_start = time.time()
     adj_cf = adjust_concurrency(cfg.cf_concurrency, cfg.cpu)
     print(c("  ─" * 30, C.B))
     print(c("  Cloudflare IP 检测与 API 精准过滤", C.LC))
     print(c("  ─" * 30, C.B))
-    hit_count = run_cf_scanner(cf_in, cf_out, adj_cf, progress_callback=_cb)
+    hit_count = run_cf_scanner(cf_in, cf_out, adj_cf,
+                                progress_callback=_make_deep_mine_cb(step_start))
 
     if hit_count == 0:
         write_progress_done(" | CF 未命中")
@@ -1414,7 +1560,8 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
             hits.append(line)
 
     adj_api = adjust_concurrency(cfg.api_concurrency, cfg.cpu)
-    new_results = verify_batch(hits, concurrency=adj_api, progress_callback=_cb)
+    new_results = verify_batch(hits, concurrency=adj_api,
+                                progress_callback=_make_deep_mine_cb(step_start))
     if new_results:
         enrich_geoip(new_results)
 
@@ -1441,18 +1588,69 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     return len(real_new)
 
 
+def _make_deep_mine_cb(step_start: float):
+    def _cb(typ, data):
+        if typ in ("masscan_progress", "scan_progress"):
+            cur = data.get("current", 0)
+            total = data.get("total", 1)
+            pct = min(cur / total * 100, 100)
+            elapsed = time.time() - step_start
+            eta = (elapsed / pct * (100 - pct)) if pct > 1 else 0
+            eta_s = f" | ETA {int(eta // 60)}分{int(eta % 60)}秒" if pct > 1 else ""
+            extra = f" | CF检测{eta_s}" if typ == "scan_progress" else eta_s
+            write_progress(pct, extra)
+        elif typ == "log":
+            msg = str(data)
+            if msg.startswith("API 验证") or "Masscan 批次" in msg:
+                return
+            sys.stderr.write("\n\r")
+            sys.stderr.flush()
+            print(f"  {msg}")
+        elif typ == "error":
+            print(c(f"  [FAIL] {data}", C.LR))
+    return _cb
+
+
+def _run_deep_mine_scan(cidr_file: Path, cfg: ScannerConfig) -> list[str]:
+    if not (os.path.exists("/usr/local/bin/masscan") or os.system("which masscan >/dev/null 2>&1") == 0):
+        print("  Masscan 不可用，直接从 CIDR 扩展 IP 进行 cf-scanner 扫描...")
+        port_list = [p.strip() for p in cfg.scan_ports.split(",") if p.strip().isdigit()]
+        cidrs = [l.strip() for l in cidr_file.read_text().splitlines() if l.strip()]
+        if not cidrs:
+            return []
+        ips = expand_cidrs(cidrs, max_ips=5000)
+        result = []
+        for ip in ips:
+            for p in port_list[:3]:
+                result.append(f"{ip}:{p}")
+        return result
+
+    step_start = time.time()
+    masscan_rate = probe_masscan_rate(quiet=True)
+    print(c("  ─" * 30, C.B))
+    print(c("  基于 Masscan 执行端口扫描任务", C.LC))
+    print(c("  ─" * 30, C.B))
+    ms_start = time.time()
+    masscan_hits = run_masscan(cidr_file, cfg.scan_ports, masscan_rate,
+                                progress_callback=_make_deep_mine_cb(step_start))
+    ms_elapsed = int(time.time() - ms_start)
+    ms_m, ms_s = divmod(ms_elapsed, 60)
+    print(c(f"  本步耗时: {ms_m}分{ms_s}秒" if ms_m else f"  本步耗时: {ms_s}秒", C.GY))
+    return masscan_hits
+
+
 def _serve_download(file_path: Path) -> None:
     lan_ip = get_lan_ip()
-    port = 8899
+    port = HTTP_SERVER_PORT
 
     if not port_is_free(port):
         print(c(f"  端口 {port} 被占用，尝试释放...", C.LY))
         if kill_port_process(port) and port_is_free(port):
             print(c(f"  已释放端口 {port}", C.LG))
         else:
-            while not port_is_free(port) and port < 9900:
+            while not port_is_free(port) and port < HTTP_SERVER_PORT_RANGE_END:
                 port += 1
-            if port >= 9900:
+            if port >= HTTP_SERVER_PORT_RANGE_END:
                 print(c("  无可用端口，跳过下载服务", C.LY))
                 print(c(f"  [CSV] {file_path}", C.W))
                 return
