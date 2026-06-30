@@ -1065,11 +1065,14 @@ def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
         return
 
     result_lines: list[str] = []
+    cfst_header = ""
     in_table = False
     for line in output.split("\n"):
         stripped = line.strip()
         if "IP 地址" in stripped and "已发送" in stripped:
             in_table = True
+            _hdr_idx = stripped.find("IP 地址")
+            cfst_header = stripped[_hdr_idx:] if _hdr_idx >= 0 else stripped
             continue
         if in_table and re.match(r'^\d{1,3}\.', stripped):
             result_lines.append(stripped)
@@ -1082,7 +1085,8 @@ def _run_cfst_speedtest(verified_file: Path, a, tag: str) -> None:
 
     print_sep("─", C.B)
     print(c(f"  CloudflareSpeedTest 最优 IP（按下载速度排序，共 {len(result_lines)} 条）", C.LC))
-    print(c(f"  {'IP 地址':<20} {'已发送':<8} {'已接收':<8} {'丢包率':<8} {'平均延迟':<10} {'下载速度(MB/s)':<16} 地区码", C.W))
+    if cfst_header:
+        print(c(f"  {cfst_header}", C.W))
     for i, rl in enumerate(result_lines):
         color = C.G if i == 0 else (C.GY if i < 3 else C.W)
         print(c(f"  {rl}", color))
