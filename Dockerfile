@@ -15,7 +15,7 @@ RUN git clone --depth 1 https://github.com/robertdavidgraham/masscan . \
     && cp bin/masscan /usr/local/bin/ \
     && rm -rf /tmp/masscan
 
-WORKDIR /opt/ASNIPtest
+WORKDIR /opt/IP-Tidy
 COPY . .
 COPY --from=builder /src/cf-scanner ./cf-scanner
 RUN chmod +x cf-scanner

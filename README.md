@@ -1,6 +1,6 @@
 <p align="center">
   <br>
-  <img src="https://img.shields.io/badge/version-2.2.4-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-2.2.5-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.8+-green?style=flat-square" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20|%20macOS%20|%20WSL2-lightgrey?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange?style=flat-square" alt="license">
@@ -294,6 +294,17 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：
 ---
 
 ## 📝 更新日志
+
+### 🔖 v2.2.5
+
+- 🧹 Masscan XML 解析逻辑抽取为 `parse_masscan_xml()` 公共函数，消除 3 处重复代码
+- 🧹 `main()` 函数拆分为 6 个子函数，提升可维护性
+- 🧹 清理 `scanner_pipeline.py` 未使用的导入（socket, threading, ET, datetime）
+- 🧹 清理 `run.py` 未使用的导入（random, socket, threading, ET, field）
+- 🐛 修复 `random_probe_ports()` 区间轮转 bug：`% 3` -> `% 4`，第 4 区间 60001-65535 现可被访问
+- 🐛 异常处理区分 `KeyboardInterrupt`，用户取消时退出码 130
+- 🐛 Go cf-scanner ANSI 转义在非 TTY 环境不再输出控制字符
+- ⚙️ Dockerfile 工作目录 `ASNIPtest` -> `IP-Tidy`
 
 ### 🔖 v2.2.4
 

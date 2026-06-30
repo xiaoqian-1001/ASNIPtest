@@ -22,7 +22,34 @@ var (
 	connectTO   = flag.Duration("connect-timeout", 1500*time.Millisecond, "TCP+TLS connect timeout")
 	port        = flag.String("p", "443", "Target port")
 	sni         = flag.String("sni", "cloudflare.com", "TLS SNI to send")
+	useAnsi     bool
 )
+
+func init() {
+	fi, err := os.Stdout.Stat()
+	useAnsi = err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+}
+
+func clearLine() string {
+	if useAnsi {
+		return "\r\033[K"
+	}
+	return ""
+}
+
+func progressFmt() string {
+	if useAnsi {
+		return "\r\033[KScanned %d/%d (%.1f%%) | %.0f/s | hits=%d | ETA %s"
+	}
+	return "Scanned %d/%d (%.1f%%) | %.0f/s | hits=%d | ETA %s\n"
+}
+
+func doneFmt() string {
+	if useAnsi {
+		return "\r\033[KDone! %d/%d (100%%) | %s | hits=%d\n"
+	}
+	return "Done! %d/%d (100%%) | %s | hits=%d\n"
+}
 
 func isCloudflareProxy(ip string) (bool, string) {
 	targetHost, targetPort := ip, *port
@@ -185,9 +212,9 @@ func main() {
 				if rate > 0 {
 					eta = time.Duration(float64(remain)/rate) * time.Second
 				}
-				pct := float64(startSkip+n) / float64(total) * 100
-				fmt.Printf("\r\033[KScanned %d/%d (%.1f%%) | %.0f/s | hits=%d | ETA %s",
-					startSkip+n, total, pct, rate, hitCount.Load(), eta.Round(time.Second))
+			pct := float64(startSkip+n) / float64(total) * 100
+			fmt.Printf(progressFmt(),
+				startSkip+n, total, pct, rate, hitCount.Load(), eta.Round(time.Second))
 			}
 		}
 	}()
@@ -222,7 +249,7 @@ func main() {
 	os.WriteFile(*stateFile, []byte(fmt.Sprintf("%s\t%d", *inputFile, total)), 0644)
 
 	elapsed := time.Since(startTime)
-	fmt.Printf("\r\033[KDone! %d/%d (100%%) | %s | hits=%d\n",
+	fmt.Printf(doneFmt(),
 		total, total, elapsed.Round(time.Second), hitCount.Load())
 	fmt.Printf("Results: %s (%d hits)\n", *outputFile, hitCount.Load())
 	os.Remove(*stateFile)

@@ -5,21 +5,17 @@ import sys
 import re
 import time
 import json
-import socket
 import ipaddress
-import threading
 import subprocess
 import urllib.request
-import xml.etree.ElementTree as ET
 from pathlib import Path
-from datetime import datetime
 from typing import Optional, Callable, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .scanner_utils import (
     BASE, CF_SCANNER, VERIFY_PY, API_URL, WIDE_PORTS,
     _MASSCAN_BATCH,
-    merge_cidrs,
+    merge_cidrs, parse_masscan_xml,
     subnet_split, quick_probe, sample_ips,
     port_count, split_port_batches,
     masscan_adapter_ip, masscan_bin,
@@ -161,27 +157,7 @@ def run_masscan(cidr_file: Path, ports_str: str, rate: int,
                            stdin=subprocess.DEVNULL, check=False)
 
         if batch_xml.exists() and batch_xml.stat().st_size > 0:
-            try:
-                tree = ET.parse(batch_xml)
-                for host in tree.getroot().findall("host"):
-                    addr = host.find("address")
-                    if addr is None:
-                        continue
-                    ip = addr.get("addr", "")
-                    ports_elem = host.find("ports")
-                    if ports_elem is None:
-                        continue
-                    for port in ports_elem.findall("port"):
-                        state = port.find("state")
-                        if state is None or state.get("state") != "open":
-                            continue
-                        if state.get("reason", "") not in ("syn-ack", "synack"):
-                            continue
-                        portid = port.get("portid", "")
-                        if ip and portid:
-                            all_open.append(f"{ip}:{portid}")
-            except Exception:
-                pass
+            all_open.extend(parse_masscan_xml(batch_xml))
 
         if is_multi:
             try:

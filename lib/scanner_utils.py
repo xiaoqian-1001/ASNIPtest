@@ -123,7 +123,7 @@ def random_probe_ports(n: int, existing_ports: str) -> str:
     attempts = 0
     hi_ranges = [(1, 9999), (10000, 19999), (20000, 60000), (60001, 65535)]
     while len(result) < n and attempts < n * 20:
-        lo, hi = hi_ranges[attempts % 3]
+        lo, hi = hi_ranges[attempts % 4]
         port = random.randint(lo, hi)
         if port not in existing:
             existing.add(port)
@@ -152,6 +152,32 @@ def port_count(port_str: str) -> int:
             if 1 <= p <= 65535:
                 total += 1
     return total
+
+
+def parse_masscan_xml(xml_path: Path) -> list[str]:
+    results: list[str] = []
+    try:
+        tree = ET.parse(xml_path)
+        for host in tree.getroot().findall("host"):
+            addr = host.find("address")
+            if addr is None:
+                continue
+            ip = addr.get("addr", "")
+            ports_elem = host.find("ports")
+            if ports_elem is None:
+                continue
+            for port in ports_elem.findall("port"):
+                state = port.find("state")
+                if state is None or state.get("state") != "open":
+                    continue
+                if state.get("reason", "") not in ("syn-ack", "synack"):
+                    continue
+                portid = port.get("portid", "")
+                if ip and portid:
+                    results.append(f"{ip}:{portid}")
+    except ET.ParseError:
+        pass
+    return results
 
 
 def split_port_batches(port_str: str) -> list[str]:

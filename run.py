@@ -8,16 +8,12 @@ import os
 import re
 import time
 import json
-import random
-import socket
 import ipaddress
-import threading
 import argparse
 import subprocess
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Callable, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -36,7 +32,7 @@ from lib.utils import (
 from lib.geoip import lookup as geo_lookup, is_available as geo_available, geo_update_interactive
 from lib.scanner_utils import (
     find_iface, probe_masscan_rate, detect_hardware, tcp_latency, cf_download, test_one,
-    read_masscan_stderr,
+    read_masscan_stderr, parse_masscan_xml,
     read_default_ports, parse_targets, expand_cidrs, port_count,
     split_port_batches, adjust_concurrency, random_ports, random_probe_ports,
     WIDE_PORTS, cidr_count,
@@ -209,27 +205,7 @@ def step_masscan(cfg: ScannerConfig) -> int:
 
         if batch_total > 1:
             print(f"  解析 {batch_xml.name} ...", flush=True)
-        try:
-            tree = ET.parse(batch_xml)
-            for host in tree.getroot().findall("host"):
-                addr = host.find("address")
-                if addr is None:
-                    continue
-                ip = addr.get("addr", "")
-                ports_elem = host.find("ports")
-                if ports_elem is None:
-                    continue
-                for port in ports_elem.findall("port"):
-                    state = port.find("state")
-                    if state is None or state.get("state") != "open":
-                        continue
-                    if state.get("reason", "") not in ("syn-ack", "synack"):
-                        continue
-                    portid = port.get("portid", "")
-                    if ip and portid:
-                        all_open.append(f"{ip}:{portid}")
-        except ET.ParseError:
-            pass
+        all_open.extend(parse_masscan_xml(batch_xml))
 
         if batch_total > 1:
             try:
@@ -404,27 +380,7 @@ def step_deep_scan(cfg: ScannerConfig) -> int:
                            stdin=subprocess.DEVNULL, check=False)
 
         batch_before = len(all_open)
-        try:
-            tree = ET.parse(batch_xml)
-            for host in tree.getroot().findall("host"):
-                addr = host.find("address")
-                if addr is None:
-                    continue
-                ip_addr = addr.get("addr", "")
-                ports_elem = host.find("ports")
-                if ports_elem is None:
-                    continue
-                for port in ports_elem.findall("port"):
-                    state = port.find("state")
-                    if state is None or state.get("state") != "open":
-                        continue
-                    if state.get("reason", "") not in ("syn-ack", "synack"):
-                        continue
-                    portid = port.get("portid", "")
-                    if ip_addr and portid:
-                        all_open.append(f"{ip_addr}:{portid}")
-        except ET.ParseError:
-            pass
+        all_open.extend(parse_masscan_xml(batch_xml))
 
         new_in_batch = len(all_open) - batch_before
         print(f"  {prefix}端口开放: +{new_in_batch} (累计 {len(all_open)})", flush=True)
@@ -619,6 +575,285 @@ def _print_visualization(csv_path: Path) -> None:
             print(f"  {country}: {len(lats)} 节点, 平均延迟 {avg_lat:.0f}ms")
 
 
+def _resolve_port_mode(a, cfg, sys_args: list[str]) -> bool:
+    probe_added = False
+    port_mode_name = "默认端口"
+
+    if a.ports:
+        cfg.scan_ports = parse_ports(a.ports)
+        if not cfg.scan_ports:
+            print(c(f"  [FAIL] 无效端口: {a.ports}", C.LR))
+            sys.exit(1)
+        port_mode_name = "自定义端口"
+        print(f"  自定义端口: {cfg.scan_ports}")
+    elif a.wide:
+        cfg.scan_ports = WIDE_PORTS
+        if not a.rate:
+            cfg.masscan_rate = max(500, cfg.masscan_rate // 2)
+        port_mode_name = "宽端口池"
+        print(f"  宽端口模式: {port_count(cfg.scan_ports)} 端口 ({cfg.masscan_rate} pps)")
+    elif a.random:
+        cfg.scan_ports = random_ports()
+        port_mode_name = "随机5个端口"
+        print(f"  随机端口: {cfg.scan_ports}")
+    elif not sys_args and not a.targets:
+        print(f"  默认端口：{cfg.scan_ports}")
+        print(f"  宽端口池：{WIDE_PORTS}")
+        try:
+            inp = input(c("  端口模式（回车=默认端口 | w=宽端口 | r=随机5个端口 | 直接输入=自定义端口）：", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            inp = ""
+        if inp == "w":
+            cfg.scan_ports = WIDE_PORTS
+            cfg.masscan_rate = max(500, cfg.masscan_rate // 2)
+            port_mode_name = "宽端口池"
+            print(f"  宽端口模式: {port_count(cfg.scan_ports)} 端口 ({cfg.masscan_rate} pps)")
+        elif inp == "r":
+            cfg.scan_ports = random_ports()
+            port_mode_name = "随机5个端口"
+            print(f"  随机端口: {cfg.scan_ports}")
+        elif inp:
+            parsed = parse_ports(inp)
+            if parsed:
+                cfg.scan_ports = parsed
+                port_mode_name = "自定义端口"
+                print(f"  扫描端口: {cfg.scan_ports}")
+        else:
+            try:
+                probe = input(c("  是否追加随机端口探活：请输入探测数量（取值 1-100），回车则跳过该步骤：", C.Y)).strip()
+            except (EOFError, KeyboardInterrupt):
+                probe = ""
+            if probe.isdigit():
+                n = max(1, min(int(probe), 100))
+                extra = random_probe_ports(n, cfg.scan_ports)
+                if extra:
+                    cfg.scan_ports = cfg.scan_ports + "," + extra
+                    probe_added = True
+                    print(f"  默认端口 +{n} 端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})")
+    else:
+        cp = _parse_custom_port(sys_args)
+        if cp:
+            cfg.scan_ports = cp
+            port_mode_name = "自定义端口"
+
+    if a.probe_ports:
+        n = max(1, min(a.probe_ports, 100))
+        extra = random_probe_ports(n, cfg.scan_ports)
+        if extra:
+            cfg.scan_ports = cfg.scan_ports + "," + extra
+            probe_added = True
+            print(c(f"  随机探口: +{n} 个端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})", C.CY))
+        else:
+            print(c(f"  随机探口: 无新端口可追加", C.Y))
+
+    port_desc = f"默认端口+随机端口组合模式 ({port_count(cfg.scan_ports)} 个)" if probe_added else f"{port_mode_name} ({port_count(cfg.scan_ports)} 个)"
+    print(c(f"  [已确认] 端口模式: {port_desc}", C.LG))
+    return probe_added
+
+
+def _interactive_choices(a, v4_cidrs: list[str], asns: list[str]) -> tuple[bool, bool]:
+    if not a.smart and v4_cidrs:
+        has_large = any(
+            ipaddress.ip_network(c, strict=False).prefixlen < _SUBNET_THRESHOLD
+            for c in v4_cidrs
+        )
+        if has_large:
+            print(c(f"  [INFO] 检测到大 CIDR (/{_SUBNET_THRESHOLD}+)，可启用智能子网分级探活", C.W))
+            try:
+                ch = input(c("  是否启用智能子网分级？(y/n, 回车跳过): ", C.Y)).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ch = ""
+            if ch == "y":
+                a.smart = True
+                print(c("  [已确认] 智能子网分级探活 (拆分 /24 抽样)", C.G))
+            else:
+                print(c("  [已跳过] 智能子网分级 (全量扫描)", C.G))
+
+    do_speed = a.speed
+    do_deep = a.deep
+    if not do_speed:
+        try:
+            ts = input(c("  是否测速？(y/n, 回车跳过): ", C.Y)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ts = ""
+        do_speed = ts == "y"
+        if not do_speed:
+            print(c("  [已跳过] 测速功能 (回车自动选择)", C.G))
+    if not do_deep and not sys.argv[1:]:
+        try:
+            ch = input(c("  深度扫描？(y/n, 回车跳过): ", C.Y)).strip().lower()
+            do_deep = ch == "y"
+            if not do_deep:
+                print(c("  [已跳过] 深度扫描 (回车自动选择)", C.G))
+        except (EOFError, KeyboardInterrupt):
+            do_deep = False
+    if not a.incremental and not sys.argv[1:]:
+        incr_tag_hint = _incr_tag(asns, v4_cidrs)
+        has_state = (INCR_DIR / f"{incr_tag_hint}_cidrs.txt").exists()
+        if has_state:
+            try:
+                ch = input(c("  是否开启增量扫描模式？仅对新增CIDR网段执行探测 (y/n, 回车跳过): ", C.Y)).strip().lower()
+                a.incremental = ch == "y"
+                if a.incremental:
+                    print(c("  [已确认] 增量扫描 (对比上次CIDR，仅扫新增)", C.G))
+                else:
+                    print(c("  [已跳过] 增量扫描 (回车自动选择)", C.G))
+            except (EOFError, KeyboardInterrupt):
+                pass
+    return do_speed, do_deep
+
+
+def _build_steps(a, cfg, asns: list[str], v4_cidrs: list[str],
+                 do_speed: bool, do_deep: bool) -> list[tuple[str, Callable[[], object]]]:
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("Step 1  通过 ASN 提取 CIDR 网段", lambda: step_fetch_prefixes(cfg, asns, v4_cidrs)),
+    ]
+    step_num = 1
+    if a.smart:
+        step_num += 1
+        cfg.smart_mode = True
+        steps.append((f"Step {step_num}  子网分级探活", lambda: _smart_wrapper(cfg)))
+    if a.skip_masscan:
+        print(c("  (跳过 Masscan, 使用已有结果)", C.W))
+    else:
+        step_num += 1
+        steps.append((f"Step {step_num}  基于 Masscan 执行端口扫描任务", lambda: step_masscan(cfg)))
+    step_num += 1
+    steps.append((f"Step {step_num}  Cloudflare IP 检测与 API 精准过滤", lambda: _pipeline(cfg)))
+    step_num += 1
+    steps.append((f"Step {step_num}  IP 深度挖掘探测", lambda: step_deep_mine(cfg)))
+    if do_deep:
+        step_num += 1
+        steps.append((f"Step {step_num}  深度宽端口扫描", lambda: step_deep_scan(cfg)))
+    if do_speed:
+        step_num += 1
+        steps.append((f"Step {step_num}  网络延迟/带宽速率检测", lambda: step_speed_test(cfg)))
+    return steps
+
+
+def _cleanup_temp_files(a) -> None:
+    for stale in ("cidrs.txt", "cidrs_v4.txt",
+                  "masscan_result.xml", "cf_hits.txt", "verified.txt"):
+        p = BASE / stale
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+    for p in BASE.glob("masscan_batch_*.xml"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    for p in BASE.glob("deep_*.xml"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    for fname in ("deep_ips.txt",):
+        p = BASE / fname
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+    if not a.skip_masscan:
+        mp = BASE / "masscan_result.txt"
+        try:
+            if mp.exists():
+                mp.unlink()
+        except OSError:
+            pass
+
+
+def _generate_csv(verified_file: Path, asns: list[str], a,
+                  incr_tag: str, incr_saved_results: list[str],
+                  incr_full_cidrs: list[str], v4_list: list[str],
+                  passed_count: int) -> tuple[Optional[Path], int]:
+    csv_path = None
+    if not (verified_file.exists() and verified_file.stat().st_size > 0):
+        return csv_path, passed_count
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = "_".join(asns) if asns else "cidr"
+    csv_path = BASE / f"output_{tag}_{ts}.csv"
+
+    parsed: list[str] = []
+    with open(verified_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("IP"):
+                continue
+            if line.count(",") >= 8:
+                parsed.append(line)
+
+    with open(csv_path, "w") as f:
+        f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
+        for p in parsed:
+            parts = p.split(",")
+            ip = parts[0]
+            port = parts[1]
+            colo = parts[3]
+            country = parts[4]
+            city = parts[5]
+            latency = parts[6]
+            asn_val = parts[8]
+            proto = "IPv6" if ":" in ip else "IPv4"
+            try:
+                gi = geo_lookup(ip)
+                if gi:
+                    if gi.get("country") and not country:
+                        country = gi["country"]
+                    if gi.get("city"):
+                        city = gi["city"]
+            except Exception:
+                pass
+            spd = parts[7] if len(parts) > 7 else ""
+            f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn_val},{proto}\n")
+
+    print(c(f"  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
+
+    if a.incremental and incr_tag and incr_saved_results:
+        merged: dict[str, str] = {}
+        for line in incr_saved_results:
+            if not line or line.startswith("#") or line.startswith("IP"):
+                continue
+            parts = line.split(",", 2)
+            key = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else line
+            merged[key] = line
+        new_count = 0
+        for line in parsed:
+            parts = line.split(",", 2)
+            key = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else line
+            if key not in merged:
+                new_count += 1
+            merged[key] = line
+        merged_lines = sorted(merged.values())
+        with open(csv_path, "w") as f:
+            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
+            for p in merged_lines:
+                parts = p.split(",")
+                ip = parts[0]
+                port = parts[1]
+                colo = parts[3] if len(parts) > 3 else ""
+                country = parts[4] if len(parts) > 4 else ""
+                city = parts[5] if len(parts) > 5 else ""
+                latency = parts[6] if len(parts) > 6 else ""
+                asn_v = parts[8] if len(parts) > 8 else ""
+                proto = "IPv4"
+                spd = parts[7] if len(parts) > 7 else ""
+                f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn_v},{proto}\n")
+        print(c(f"  合并: {len(incr_saved_results) - 1} 历史 + {new_count} 新增 -> {len(merged)} 条", C.CY))
+        passed_count = len(merged)
+        save_incremental_state(incr_tag, incr_full_cidrs or v4_list, merged_lines)
+    elif a.incremental and incr_tag:
+        if incr_full_cidrs:
+            save_incremental_state(incr_tag, incr_full_cidrs, parsed)
+        else:
+            save_incremental_state(incr_tag, v4_list, parsed)
+    return csv_path, passed_count
+
+
 def main() -> None:
     main_start = time.time()
     parser = argparse.ArgumentParser(
@@ -692,204 +927,22 @@ def main() -> None:
         cfg.masscan_rate = max(100, a.rate)
         print(f"  发包速率: {cfg.masscan_rate} pps (手动)")
 
-    probe_added = False
-    port_mode_name = "默认端口"
-
-    if a.ports:
-        cfg.scan_ports = parse_ports(a.ports)
-        if not cfg.scan_ports:
-            print(c(f"  [FAIL] 无效端口: {a.ports}", C.LR))
-            sys.exit(1)
-        port_mode_name = "自定义端口"
-        print(f"  自定义端口: {cfg.scan_ports}")
-    elif a.wide:
-        cfg.scan_ports = WIDE_PORTS
-        if not a.rate:
-            cfg.masscan_rate = max(500, cfg.masscan_rate // 2)
-        port_mode_name = "宽端口池"
-        print(f"  宽端口模式: {port_count(cfg.scan_ports)} 端口 ({cfg.masscan_rate} pps)")
-    elif a.random:
-        cfg.scan_ports = random_ports()
-        port_mode_name = "随机5个端口"
-        print(f"  随机端口: {cfg.scan_ports}")
-    elif not sys.argv[1:] and not a.targets:
-        print(f"  默认端口：{cfg.scan_ports}")
-        print(f"  宽端口池：{WIDE_PORTS}")
-        try:
-            inp = input(c("  端口模式（回车=默认端口 | w=宽端口 | r=随机5个端口 | 直接输入=自定义端口）：", C.Y)).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            inp = ""
-        if inp == "w":
-            cfg.scan_ports = WIDE_PORTS
-            cfg.masscan_rate = max(500, cfg.masscan_rate // 2)
-            port_mode_name = "宽端口池"
-            print(f"  宽端口模式: {port_count(cfg.scan_ports)} 端口 ({cfg.masscan_rate} pps)")
-        elif inp == "r":
-            cfg.scan_ports = random_ports()
-            port_mode_name = "随机5个端口"
-            print(f"  随机端口: {cfg.scan_ports}")
-        elif inp:
-            parsed = parse_ports(inp)
-            if parsed:
-                cfg.scan_ports = parsed
-                port_mode_name = "自定义端口"
-                print(f"  扫描端口: {cfg.scan_ports}")
-        else:
-            try:
-                probe = input(c("  是否追加随机端口探活：请输入探测数量（取值 1-100），回车则跳过该步骤：", C.Y)).strip()
-            except (EOFError, KeyboardInterrupt):
-                probe = ""
-            if probe.isdigit():
-                n = max(1, min(int(probe), 100))
-                extra = random_probe_ports(n, cfg.scan_ports)
-                if extra:
-                    cfg.scan_ports = cfg.scan_ports + "," + extra
-                    probe_added = True
-                    print(f"  默认端口 +{n} 端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})")
-    else:
-        cp = _parse_custom_port(sys.argv[1:])
-        if cp:
-            cfg.scan_ports = cp
-            port_mode_name = "自定义端口"
-
-    if a.probe_ports:
-        n = max(1, min(a.probe_ports, 100))
-        extra = random_probe_ports(n, cfg.scan_ports)
-        if extra:
-            cfg.scan_ports = cfg.scan_ports + "," + extra
-            probe_added = True
-            print(c(f"  随机探口: +{n} 个端口 -> 共 {port_count(cfg.scan_ports)} 端口 ({extra})", C.CY))
-        else:
-            print(c(f"  随机探口: 无新端口可追加", C.Y))
-
-    port_desc = f"默认端口+随机端口组合模式 ({port_count(cfg.scan_ports)} 个)" if probe_added else f"{port_mode_name} ({port_count(cfg.scan_ports)} 个)"
-    print(c(f"  [已确认] 端口模式: {port_desc}", C.LG))
-
-    if not a.smart and v4_cidrs:
-        has_large = any(
-            ipaddress.ip_network(c, strict=False).prefixlen < _SUBNET_THRESHOLD
-            for c in v4_cidrs
-        )
-        if has_large:
-            print(c(f"  [INFO] 检测到大 CIDR (/{_SUBNET_THRESHOLD}+)，可启用智能子网分级探活", C.W))
-            try:
-                ch = input(c("  是否启用智能子网分级？(y/n, 回车跳过): ", C.Y)).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                ch = ""
-            if ch == "y":
-                a.smart = True
-                print(c("  [已确认] 智能子网分级探活 (拆分 /24 抽样)", C.G))
-            else:
-                print(c("  [已跳过] 智能子网分级 (全量扫描)", C.G))
-
-    total_steps = 3 if a.skip_masscan else 4
-    do_speed = a.speed
-    do_deep = a.deep
-    if not do_speed:
-        try:
-            ts = input(c("  是否测速？(y/n, 回车跳过): ", C.Y)).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ts = ""
-        do_speed = ts == "y"
-        if not do_speed:
-            print(c("  [已跳过] 测速功能 (回车自动选择)", C.G))
-    if not do_deep and not sys.argv[1:]:
-        try:
-            ch = input(c("  深度扫描？(y/n, 回车跳过): ", C.Y)).strip().lower()
-            do_deep = ch == "y"
-            if not do_deep:
-                print(c("  [已跳过] 深度扫描 (回车自动选择)", C.G))
-        except (EOFError, KeyboardInterrupt):
-            do_deep = False
-    if not a.incremental and not sys.argv[1:]:
-        incr_tag_hint = _incr_tag(asns, v4_cidrs)
-        has_state = (INCR_DIR / f"{incr_tag_hint}_cidrs.txt").exists()
-        if has_state:
-            try:
-                ch = input(c("  是否开启增量扫描模式？仅对新增CIDR网段执行探测 (y/n, 回车跳过): ", C.Y)).strip().lower()
-                a.incremental = ch == "y"
-                if a.incremental:
-                    print(c("  [已确认] 增量扫描 (对比上次CIDR，仅扫新增)", C.G))
-                else:
-                    print(c("  [已跳过] 增量扫描 (回车自动选择)", C.G))
-            except (EOFError, KeyboardInterrupt):
-                pass
-    if do_speed:
-        total_steps += 1
-    if do_deep:
-        total_steps += 1
-    total_steps += 1
-    if a.smart:
-        total_steps += 1
-
-    steps: list[tuple[str, Callable[[], object]]] = [
-        ("Step 1  通过 ASN 提取 CIDR 网段", lambda: step_fetch_prefixes(cfg, asns, v4_cidrs)),
-    ]
-    step_num = 1
-    if a.smart:
-        step_num += 1
-        cfg.smart_mode = True
-        steps.append((f"Step {step_num}  子网分级探活", lambda: _smart_wrapper(cfg)))
-    if a.skip_masscan:
-        print(c("  (跳过 Masscan, 使用已有结果)", C.W))
-    else:
-        step_num += 1
-        steps.append((f"Step {step_num}  基于 Masscan 执行端口扫描任务", lambda: step_masscan(cfg)))
-    step_num += 1
-    steps.append((f"Step {step_num}  Cloudflare IP 检测与 API 精准过滤", lambda: _pipeline(cfg)))
-    step_num += 1
-    steps.append((f"Step {step_num}  IP 深度挖掘探测", lambda: step_deep_mine(cfg)))
-    if do_deep:
-        step_num += 1
-        steps.append((f"Step {step_num}  深度宽端口扫描", lambda: step_deep_scan(cfg)))
-    if do_speed:
-        step_num += 1
-        steps.append((f"Step {step_num}  网络延迟/带宽速率检测", lambda: step_speed_test(cfg)))
-
-    for stale in ("cidrs.txt", "cidrs_v4.txt",
-                  "masscan_result.xml", "cf_hits.txt", "verified.txt"):
-        p = BASE / stale
-        try:
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
-    for p in BASE.glob("masscan_batch_*.xml"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-    for p in BASE.glob("deep_*.xml"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-    for fname in ("deep_ips.txt",):
-        p = BASE / fname
-        try:
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
-    if not a.skip_masscan:
-        mp = BASE / "masscan_result.txt"
-        try:
-            if mp.exists():
-                mp.unlink()
-        except OSError:
-            pass
+    _resolve_port_mode(a, cfg, sys.argv[1:])
+    do_speed, do_deep = _interactive_choices(a, v4_cidrs, asns)
+    steps = _build_steps(a, cfg, asns, v4_cidrs, do_speed, do_deep)
+    _cleanup_temp_files(a)
 
     cidr_count_val = 0
     v4_cidr_count = 0
     total_open = 0
     cf_nodes = 0
     passed_count = 0
-    deep_mine_count = 0
 
     incr_tag = ""
     incr_saved_results: list[str] = []
     incr_full_cidrs: list[str] = []
     incr_skip = False
+    v4_list: list[str] = list(v4_cidrs)
 
     for label, fn in steps:
         if incr_skip:
@@ -932,106 +985,21 @@ def main() -> None:
                 added = result
                 if added > 0:
                     passed_count += added
-                    deep_mine_count = added
+        except KeyboardInterrupt:
+            print(c("\n  [中断] 用户取消", C.LR))
+            sys.exit(130)
         except Exception as e:
             print(c(f"  [FAIL] {e}", C.LR))
             sys.exit(1)
 
     verified_file = BASE / "verified.txt"
-    csv_path = None
-    if verified_file.exists() and verified_file.stat().st_size > 0:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tag = "_".join(asns) if asns else "cidr"
-        csv_path = BASE / f"output_{tag}_{ts}.csv"
-
-        parsed: list[str] = []
-        with open(verified_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or line.startswith("IP"):
-                    continue
-                if line.count(",") >= 8:
-                    parsed.append(line)
-
-        with open(csv_path, "w") as f:
-            f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
-            for p in parsed:
-                parts = p.split(",")
-                ip = parts[0]
-                port = parts[1]
-                colo = parts[3]
-                country = parts[4]
-                region = parts[5]
-                latency = parts[6]
-                asn = parts[8]
-                proto = "IPv6" if ":" in ip else "IPv4"
-                city = region
-                isp = ""
-                loc = f"{city}, {country}" if city else country
-                try:
-                    gi = geo_lookup(ip)
-                    if gi:
-                        if gi.get("country") and not country:
-                            country = gi["country"]
-                        if gi.get("city"):
-                            city = gi["city"]
-                        if gi.get("isp"):
-                            isp = gi["isp"]
-                except Exception:
-                    pass
-                spd = parts[7] if len(parts) > 7 else ""
-                f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn},{proto}\n")
-
-        print(c(f"  结果: {len(parsed)} 条 -> {csv_path.name}", C.G))
-
-        if a.incremental and incr_tag and incr_saved_results:
-            merged: dict[str, str] = {}
-            for line in incr_saved_results:
-                if not line or line.startswith("#") or line.startswith("IP"):
-                    continue
-                parts = line.split(",", 2)
-                key = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else line
-                merged[key] = line
-            new_count = 0
-            for line in parsed:
-                parts = line.split(",", 2)
-                key = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else line
-                if key not in merged:
-                    new_count += 1
-                merged[key] = line
-            merged_lines = sorted(merged.values())
-            with open(csv_path, "w") as f:
-                f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN,协议\n")
-                for p in merged_lines:
-                    parts = p.split(",")
-                    ip = parts[0]
-                    port = parts[1]
-                    colo = parts[3] if len(parts) > 3 else ""
-                    country = parts[4] if len(parts) > 4 else ""
-                    city = parts[5] if len(parts) > 5 else ""
-                    latency = parts[6] if len(parts) > 6 else ""
-                    asn_val = parts[8] if len(parts) > 8 else ""
-                    proto = "IPv4"
-                    spd = parts[7] if len(parts) > 7 else ""
-                    f.write(f"{ip},{port},TRUE,{colo},{country},{city},{latency},{spd},{asn_val},{proto}\n")
-            print(c(f"  合并: {len(incr_saved_results) - 1} 历史 + {new_count} 新增 -> {len(merged)} 条", C.CY))
-            passed_count = len(merged)
-            save_incremental_state(incr_tag, incr_full_cidrs or v4_list, merged_lines)
-        elif a.incremental and incr_tag:
-            if incr_full_cidrs:
-                save_incremental_state(incr_tag, incr_full_cidrs, parsed)
-            else:
-                save_incremental_state(incr_tag, v4_list, parsed)
+    csv_path, passed_count = _generate_csv(verified_file, asns, a,
+                                           incr_tag, incr_saved_results,
+                                           incr_full_cidrs, v4_list, passed_count)
 
     print_result_header(
-        len(asns),
-        cidr_count_val,
-        total_open,
-        cf_nodes,
-        passed_count,
-        v4_cidr_count,
+        len(asns), cidr_count_val, total_open, cf_nodes, passed_count, v4_cidr_count,
     )
-
     print_sep("-", C.W)
     print_total_time(time.time() - main_start)
 
