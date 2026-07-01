@@ -932,10 +932,10 @@ def _run_cfst_speedtest(a, tag: str) -> None:
     except Exception:
         return
 
-    rtt_limit = cfst_limit * 3
+    rtt_limit = max(1, int(len(ips) * 0.4))
     if len(ips) > rtt_limit:
         from lib.rtt_sorter import rtt_sort
-        print(c(f"  [RTT] 候选 IP ({len(ips)}) 过多，预筛至 {rtt_limit} 个...", C.W))
+        print(c(f"  [RTT] 候选 IP ({len(ips)}) 过多，预筛至 {rtt_limit} 个(40%)...", C.W))
         cands = [f"{ip}:443" for ip in ips]
         rtt_results = rtt_sort(cands, top_k=rtt_limit)
         ips = {r.ip for r in rtt_results}
@@ -953,7 +953,7 @@ def _run_cfst_speedtest(a, tag: str) -> None:
 
     proc = subprocess.Popen(
         [str(cfst_bin), "-f", str(ip_file),
-         "-dn", str(cfst_limit), "-p", str(cfst_limit),
+         "-dn", str(len(ips)), "-p", str(cfst_limit),
          "-o", str(result_file)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
