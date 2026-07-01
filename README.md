@@ -1,6 +1,6 @@
 <p align="center">
   <br>
-  <img src="https://img.shields.io/badge/version-2.4.1-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-2.5.0-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.8+-green?style=flat-square" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20|%20macOS%20|%20WSL2-lightgrey?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange?style=flat-square" alt="license">
@@ -303,6 +303,14 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：
 ---
 
 ## 📝 更新日志
+
+### 🔖 v2.5.0
+
+- ⚡ RTT 探测优化：单次 TCP 握手复用 HTTP `/cdn-cgi/trace` 探测，提取 CF-RAY 和 colo 信息
+- 🛡️ CF-RAY 验证：RTT 阶段自动过滤非 Cloudflare 节点 IP
+- 🌐 colo 区域分组：按 colo 区域最小堆保留 Top-N，提升测速候选多样性
+- 📈 滑动窗口测速：`cf_download` 改用 urllib 流式下载 + 1s 滑动窗口峰值追踪 + 首秒预热期丢弃
+- 🧹 移除无用 `http_latency` 调用
 
 ### 🔖 v2.4.1
 
