@@ -142,8 +142,7 @@ def _run_masscan_batches(ip_file: Path, ports_def: str, rate: int,
         all_open.extend(parse_masscan_xml(batch_xml))
 
         if batch_total > 1:
-            try: batch_xml.unlink()
-            except OSError: pass
+            _safe_unlink(batch_xml)
 
     result_file.write_text("\n".join(all_open) + "\n")
     return all_open
@@ -709,49 +708,31 @@ def _read_verified_entries() -> list[str]:
     return entries
 
 
+def _safe_unlink(p: Path) -> None:
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
 def _cleanup_temp_files(a) -> None:
     for stale in ("cidrs.txt", "cidrs_v4.txt",
                   "masscan_result.xml", "cf_hits.txt", "verified.txt"):
-        p = BASE / stale
-        try:
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
+        _safe_unlink(BASE / stale)
     for p in BASE.glob("masscan_batch_*.xml"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
+        _safe_unlink(p)
     for p in BASE.glob("deep_*.xml"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
+        _safe_unlink(p)
     for fname in ("deep_ips.txt", ".cfst_ips.txt"):
-        p = BASE / fname
-        try:
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
+        _safe_unlink(BASE / fname)
     if not a.skip_masscan:
-        mp = BASE / "masscan_result.txt"
-        try:
-            if mp.exists():
-                mp.unlink()
-        except OSError:
-            pass
-    # 清理旧的增量状态文件（保留最新一次）
+        _safe_unlink(BASE / "masscan_result.txt")
     incr_dir = INCR_DIR
     if incr_dir.exists():
         state_files = sorted(incr_dir.glob("*.state"))
         if len(state_files) > 1:
             for sf in state_files[:-1]:
-                try:
-                    sf.unlink()
-                except OSError:
-                    pass
+                _safe_unlink(sf)
 
 
 def _generate_csv(verified_file: Path, asns: list[str], a,
@@ -1262,20 +1243,7 @@ def main() -> None:
 
 
 def step_deep_mine(cfg: ScannerConfig) -> int:
-    verified_file = BASE / "verified.txt"
-    if not verified_file.exists() or verified_file.stat().st_size == 0:
-        return 0
-
-    existing: set[str] = set()
-    with open(verified_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("IP"):
-                continue
-            parts = line.split(",")
-            if len(parts) >= 2:
-                existing.add(f"{parts[0]}:{parts[1]}")
-
+    existing = set(_read_verified_entries())
     if not existing:
         return 0
 
@@ -1346,8 +1314,13 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
         write_progress_done(" | CF 未命中")
         print(c("  深度挖掘: CF 未命中", C.LY))
         for f in (cidr_file, cf_in, cf_out):
-            try: f.unlink()
-            except OSError: pass
+            _safe_unlink(f)
+        return 0
+
+# ... (after hit processing)
+
+    for f in (cidr_file, cf_in, cf_out):
+        _safe_unlink(f)
         return 0
 
     write_progress_done(" | ETA 0分0秒 | CF检测")
@@ -1377,8 +1350,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
                         f"{r.get('country','')},{r.get('region','')},,,AS{r.get('asn','')}\n")
 
     for f in (cidr_file, cf_in, cf_out):
-        try: f.unlink()
-        except OSError: pass
+        _safe_unlink(f)
 
     rate = len(new_results) / hit_count * 100 if hit_count else 0
     elapsed = int(time.time() - step_start)
@@ -1472,17 +1444,15 @@ def _serve_download(file_path: Path) -> None:
              "--directory", str(BASE)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if sys.stdin.isatty():
-            import time as _time
             print(c("  (请在浏览器中下载文件后按 Ctrl+C 关闭服务)", C.CY))
             try:
-                while True:
-                    _time.sleep(1)
+                time.sleep(86400)
             except (KeyboardInterrupt, EOFError):
                 pass
         else:
             print(c("  (非交互终端，按 Ctrl+C 停止服务)", C.W))
             try:
-                server.wait()
+                server.wait(timeout=86400)
             except KeyboardInterrupt:
                 pass
     except (EOFError, KeyboardInterrupt):
