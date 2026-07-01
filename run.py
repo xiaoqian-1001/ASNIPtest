@@ -932,13 +932,16 @@ def _run_cfst_speedtest(a, tag: str) -> None:
         return
 
     rtt_limit = max(1, int(len(ips) * 0.4))
-    if len(ips) > rtt_limit and len(ips) > cfst_limit:
-        from lib.rtt_sorter import rtt_sort
-        print(c(f"  [RTT] 候选 IP ({len(ips)}) 过多，预筛至 {rtt_limit} 个(40%)...", C.W))
-        cands = [f"{ip}:443" for ip in ips]
-        rtt_results = rtt_sort(cands, top_k=rtt_limit)
-        ips = {r.ip for r in rtt_results}
-        print(c(f"  [RTT] 预筛完成，{len(ips)} 个 IP 进入 cfst", C.G))
+    from lib.rtt_sorter import rtt_sort
+    cands = [f"{ip}:443" for ip in ips]
+    top_k = rtt_limit if len(ips) > rtt_limit else len(ips)
+    rtt_results = rtt_sort(cands, top_k=top_k)
+    ips = {r.ip for r in rtt_results}
+    if len(ips) > rtt_limit:
+        print(c(f"  [RTT] 候选 IP ({len(rtt_results)} 条存活) 预筛至 {rtt_limit} 个(40%)", C.W))
+    else:
+        print(c(f"  [RTT] 候选 IP ({len(cands)} 条) 过滤超时 → {len(rtt_results)} 条存活", C.W))
+    print(c(f"  [RTT] {len(ips)} 个 IP 进入 cfst", C.G))
 
     ip_file = BASE / ".cfst_ips.txt"
     ip_file.write_text("\n".join(sorted(ips)) + "\n")
