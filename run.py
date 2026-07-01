@@ -1248,6 +1248,7 @@ def main() -> None:
 
 
 def step_deep_mine(cfg: ScannerConfig) -> int:
+    verified_file = BASE / "verified.txt"
     existing = set(_read_verified_entries())
     if not existing:
         return 0
