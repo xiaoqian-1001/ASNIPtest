@@ -1,6 +1,6 @@
 <p align="center">
   <br>
-  <img src=\"https://img.shields.io/badge/version-2.4.1-blue?style=flat-square\" alt=\"version\">
+  <img src="https://img.shields.io/badge/version-2.4.1-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.8+-green?style=flat-square" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20|%20macOS%20|%20WSL2-lightgrey?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange?style=flat-square" alt="license">
