@@ -944,9 +944,8 @@ def _run_cfst_speedtest(a, tag: str) -> None:
         except (EOFError, KeyboardInterrupt):
             ch = ""
         if ch == "2":
+            ch = ""
             a.mcis = True
-            print(c("  [已选择] Monte Carlo IP Searcher 智能优选", C.G))
-            return
         if ch != "1":
             print(c("  [已跳过] 测速优选", C.LG))
             return
@@ -958,6 +957,9 @@ def _run_cfst_speedtest(a, tag: str) -> None:
                 print(c(f"  无效输入，使用默认: {CFST_DEFAULT_LIMIT}", C.LY))
         except (EOFError, KeyboardInterrupt):
             pass
+    elif a.mcis:
+        # mcis 由 _run_mcis_speedtest 处理，此处不做 cfst 交互
+        return
     else:
         print(c(f"  [CFST] CloudflareSpeedTest 测速 ({len(ips)} 个IP, 取前 {cfst_limit} 条)", C.G))
 
