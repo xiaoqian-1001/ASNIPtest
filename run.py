@@ -1357,7 +1357,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     if not existing:
         return 0
 
-    print(f"  [当前结果] 通过 {len(existing)} 个 IP:端口")
+    print(f"  [当前结果统计] 完成校验的有效 IP: {len(existing)} 条")
     ch = _safe_input("  是否启用深度挖掘？(提取 IP -> /16 CIDR 二次扫描, y/n, 回车跳过): ", to_lower=True)
     if ch != "y":
         print(c("  [已跳过] 深度挖掘", C.LG))
