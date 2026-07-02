@@ -984,14 +984,16 @@ def _run_cfst_speedtest(a, tag: str) -> None:
                 except (OSError, RuntimeError):
                     pass
         screen_results.sort(key=lambda x: -x[0])
-        if screen_results:
+        if not screen_results:
+            print(c("  [SCREEN] 1MB 快筛无结果，回退到 COLO 分组池", C.LY))
+        elif len(screen_results) < cfst_limit:
+            print(c(f"  [SCREEN] 1MB 快筛仅 {len(screen_results)} 个可用（低于 cfst_limit={cfst_limit}），回退到 COLO 分组池", C.LY))
+        else:
             ips = {ip for _, ip in screen_results[:screen_limit]}
             skipped = len(screen_results) - len(ips)
             print(c(f"  [SCREEN] 1MB 快筛: {len(screen_results)} 个可用 → 取前 {len(ips)} 个送入 CFST" +
                     (f" (跳过 {skipped} 个)" if skipped else ""), C.G))
             ip_file.write_text("\n".join(sorted(ips)) + "\n")
-        else:
-            print(c("  [SCREEN] 1MB 快筛无结果，使用全部 IP", C.LY))
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_file = BASE / f"cfst_{tag}_{ts}.csv"
