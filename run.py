@@ -1363,7 +1363,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
         print(c("  [已跳过] 深度挖掘", C.LG))
         return 0
 
-    print(c("  [已确认] 深度挖掘", C.LG))
+    print(c("  [确认] 深度挖掘已开启", C.LG))
 
     prefix = 16
     prefix_inp = _safe_input("  扩展大小 (/16, /20, /21, /22, /23, /24, 回车=/16): ")
