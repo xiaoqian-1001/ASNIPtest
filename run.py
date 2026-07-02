@@ -1366,7 +1366,7 @@ def step_deep_mine(cfg: ScannerConfig) -> int:
     print(c("  [确认] 深度挖掘已开启", C.LG))
 
     prefix = 16
-    prefix_inp = _safe_input("  扩展大小 (/16, /20, /21, /22, /23, /24, 回车=/16): ")
+    prefix_inp = _safe_input("  请输入扩展网段维度 (默认/16): ")
     if prefix_inp:
         try:
             p = int(prefix_inp.lstrip("/"))
