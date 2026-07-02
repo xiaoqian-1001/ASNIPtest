@@ -957,7 +957,7 @@ def _run_cfst_speedtest(a, tag: str) -> None:
             else:
                 heapq.heappushpop(heap, (r.rtt_ms, r.ip))
         ips = {ip for heap in per_colo.values() for _, ip in heap}
-        print(c(f"  [RTT] CF-RAY 验证通过 {len(cf_valid)} 个，按 colo 分组保留 {len(ips)} 个", C.G))
+        print(c(f"  [RTT] 完成 {len(cf_valid)} 项 CF-RAY 校验，依据 COLO 机房分组策略过滤，保留 {len(ips)} 个有效IP", C.G))
     else:
         ips = {r.ip for r in rtt_results}
         print(c("  [RTT] 无 IP 通过 CF-RAY 验证，回退到全部存活 IP", C.LY))
