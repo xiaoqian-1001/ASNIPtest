@@ -917,7 +917,7 @@ def _run_cfst_speedtest(a, tag: str) -> None:
         if ch != "y":
             print(c("  [已跳过] CloudflareSpeedTest 测速", C.LG))
             return
-        cnt = _safe_input(f"  取前多少条最优 IP？(默认 {CFST_DEFAULT_LIMIT}): ")
+        cnt = _safe_input(f"  最优 IP 保留数量 (默认TOP {CFST_DEFAULT_LIMIT}): ")
         if cnt.isdigit() and int(cnt) > 0:
             cfst_limit = int(cnt)
         elif cnt:
