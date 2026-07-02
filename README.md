@@ -309,8 +309,10 @@ masscan 需要 `CAP_NET_RAW`。以下环境不可用：
 - ⚡ RTT 探测优化：单次 TCP 握手复用 HTTP `/cdn-cgi/trace` 探测，提取 CF-RAY 和 colo 信息
 - 🛡️ CF-RAY 验证：RTT 阶段自动过滤非 Cloudflare 节点 IP
 - 🌐 colo 区域分组：按 colo 区域最小堆保留 Top-N，提升测速候选多样性
-- 📈 滑动窗口测速：`cf_download` 改用 urllib 流式下载 + 1s 滑动窗口峰值追踪 + 首秒预热期丢弃
-- 🧹 移除无用 `http_latency` 调用
+- 📈 滑动窗口测速：`cf_download` 改用 http.client 直连 + 1s 滑动窗口峰值 + 预热期 + 10MB 截断
+- 🔬 1MB 快筛：CFST 测速前使用 1MB 文件快速预筛，候选池缩至 2xN
+- 🎯 加权评分：CFST 结果按 带宽x3 + 延迟x1 加权重排，替代裸下载速度排序
+- 🧹 移除无用 `http_latency` 调用 + 异常精确化 + cfst 600s 超时兜底
 
 ### 🔖 v2.4.1
 

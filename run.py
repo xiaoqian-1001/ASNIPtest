@@ -965,6 +965,31 @@ def _run_cfst_speedtest(a, tag: str) -> None:
     ip_file = BASE / ".cfst_ips.txt"
     ip_file.write_text("\n".join(sorted(ips)) + "\n")
 
+    # 1MB 快筛：缩小 CFST 候选池
+    screen_limit = min(len(ips), cfst_limit * 2)
+    if len(ips) > screen_limit:
+        from lib.scanner_utils import cf_download as _cf_dl
+        screen_results: list[tuple[float, str]] = []
+        with ThreadPoolExecutor(max_workers=min(len(ips), 32)) as _ex:
+            _futs = {_ex.submit(_cf_dl, ip, "443", True): ip for ip in ips}
+            for _f in as_completed(_futs):
+                _ip = _futs[_f]
+                try:
+                    _mbps = _f.result()
+                    if _mbps > 0:
+                        screen_results.append((_mbps, _ip))
+                except (OSError, RuntimeError):
+                    pass
+        screen_results.sort(key=lambda x: -x[0])
+        if screen_results:
+            ips = {ip for _, ip in screen_results[:screen_limit]}
+            skipped = len(screen_results) - len(ips)
+            print(c(f"  [SCREEN] 1MB 快筛: {len(screen_results)} 个可用 → 取前 {len(ips)} 个送入 CFST" +
+                    (f" (跳过 {skipped} 个)" if skipped else ""), C.G))
+            ip_file.write_text("\n".join(sorted(ips)) + "\n")
+        else:
+            print(c("  [SCREEN] 1MB 快筛无结果，使用全部 IP", C.LY))
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_file = BASE / f"cfst_{tag}_{ts}.csv"
 
@@ -1097,8 +1122,54 @@ def _run_cfst_speedtest(a, tag: str) -> None:
         print(c("  [CFST] 未获得有效测速结果", C.LY))
         return
 
+    # 加权评分重排
+    _scored: list[tuple[float, float, str]] = []
+    for rl in result_lines:
+        parts = rl.split()
+        if len(parts) < 3:
+            _scored.append((0, 0, rl))
+            continue
+        try:
+            _lat = float(parts[-2])
+            _speed_mbs = float(parts[-1])
+            _bw = _speed_mbs * 8
+            _score = _bw * 3 + max(0, 1000 - _lat)
+            _scored.append((_score, _bw, rl))
+        except (ValueError, IndexError):
+            _scored.append((0, 0, rl))
+    _scored.sort(key=lambda x: (-x[0], -x[1]))
+    result_lines = [x[2] for x in _scored]
+
+    # 重写 CFST 结果 CSV
+    if result_file.exists():
+        import csv as _csv
+        _rows: list[list[str]] = []
+        try:
+            with open(result_file, "r", newline="", encoding="utf-8") as _f:
+                _reader = _csv.reader(_f)
+                _hdr = next(_reader, None)
+                if _hdr:
+                    _rows = list(_reader)
+        except (OSError, _csv.Error):
+            _rows = []
+        if _rows:
+            _ordered: dict[str, list[str]] = {}
+            for _rw in _rows:
+                if _rw:
+                    _key = _rw[0].strip()
+                    _ordered[_key] = _rw
+            with open(result_file, "w", newline="", encoding="utf-8") as _f:
+                _writer = _csv.writer(_f)
+                if _hdr:
+                    _writer.writerow(_hdr)
+                for _s, _bw, rl in _scored:
+                    _key = rl.split()[0] if rl.split() else ""
+                    if _key in _ordered:
+                        _writer.writerow(_ordered[_key])
+        print(c("  [SCORE] 加权评分重排完成（带宽x3 + 延迟x1）", C.G))
+
     print_sep("─", C.B)
-    print(c(f"  CloudflareSpeedTest 最优 IP（按下载速度排序，共 {len(result_lines)} 条）", C.LC))
+    print(c(f"  CloudflareSpeedTest 最优 IP（按加权评分排序，共 {len(result_lines)} 条）", C.LC))
     if cfst_header:
         print(c(f"  {cfst_header}", C.W))
     for i, rl in enumerate(result_lines):

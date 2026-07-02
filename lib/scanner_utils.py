@@ -429,11 +429,12 @@ def ssl_create_unverified():
 _DOWNLOAD_CAP_BYTES = 10 * 1024 * 1024
 
 
-def cf_download(ip: str, port: str) -> float:
+def cf_download(ip: str, port: str, quick: bool = False) -> float:
     best_window = 0.0
     target_port = int(port)
     ctx = ssl_create_unverified()
-    for host, url, size_mb, _label in _SPEED_TESTS:
+    tests = _SPEED_TESTS[:1] if quick else _SPEED_TESTS
+    for host, url, size_mb, _label in tests:
         try:
             path = url.split(host, 1)[1] if host in url else "/"
             timeout = 15 if size_mb < 10 else 30
