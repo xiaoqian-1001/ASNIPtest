@@ -641,7 +641,7 @@ def _interactive_choices(a, v4_cidrs: list[str], asns: list[str]) -> tuple[bool,
         ch = _safe_input("  是否启用深度扫描？（Y 确认、N 终止，回车跳过）：", to_lower=True)
         do_deep = ch == "y"
         if not do_deep:
-            print(c("  [已跳过] 深度扫描 (回车自动选择)", C.G))
+            print(c("  [跳过] 深度扫描", C.G))
     if not a.incremental and not sys.argv[1:]:
         incr_tag_hint = _incr_tag(asns, v4_cidrs)
         has_state = (INCR_DIR / f"{incr_tag_hint}_cidrs.txt").exists()
